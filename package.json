@@ -1,0 +1,20 @@
+{
+  "name": "frame-ops-demo",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Interview demo: Node.js + React/Next.js media ops console (NestJS, SQL, RBAC, HLS, SEO)",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @frame/api & npm run dev -w @frame/web",
+    "dev:api": "npm run dev -w @frame/api",
+    "dev:web": "npm run dev -w @frame/web",
+    "build": "npm run build -w @frame/shared && npm run build -w @frame/api && npm run build -w @frame/web",
+    "typecheck": "npm run typecheck -w @frame/shared && npm run typecheck -w @frame/api && npm run typecheck -w @frame/web"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

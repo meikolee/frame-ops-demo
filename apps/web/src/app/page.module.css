@@ -1,0 +1,247 @@
+.shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  grid-template-rows: minmax(100vh, auto) auto;
+}
+
+.rail {
+  grid-row: 1 / -1;
+  background: linear-gradient(180deg, #12151c 0%, #0c0e12 100%);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 28px 0;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+
+.railMark {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: 0.28em;
+  font-size: 0.85rem;
+  color: var(--signal);
+}
+
+.railMeta {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--mist);
+  letter-spacing: 0.12em;
+}
+
+.hero {
+  position: relative;
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(280px, 0.95fr) minmax(240px, 1.05fr);
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse 80% 60% at 70% 40%, rgba(240, 162, 2, 0.12), transparent 55%),
+    linear-gradient(135deg, #0c0e12 0%, #151a24 48%, #0c0e12 100%);
+}
+
+.heroCopy {
+  padding: clamp(48px, 10vh, 120px) clamp(28px, 5vw, 72px);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  z-index: 1;
+  animation: rise 0.7s ease both;
+}
+
+.kicker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.16em;
+  color: var(--mist);
+  margin: 0 0 18px;
+}
+
+.liveDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--live);
+  animation: pulse-live 1.6s ease infinite;
+}
+
+.brand {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: clamp(4.5rem, 14vw, 9rem);
+  line-height: 0.9;
+  letter-spacing: -0.04em;
+  color: var(--paper);
+}
+
+.lede {
+  margin: 28px 0 0;
+  max-width: 34ch;
+  font-size: 1.1rem;
+  line-height: 1.55;
+  color: var(--mist);
+  animation: rise 0.8s ease 0.12s both;
+}
+
+.ctaRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 36px;
+  animation: rise 0.8s ease 0.22s both;
+}
+
+.ctaPrimary,
+.ctaGhost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px 22px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition: transform 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.ctaPrimary {
+  background: var(--signal);
+  color: var(--ink);
+}
+
+.ctaPrimary:hover {
+  transform: translateY(-2px);
+}
+
+.ctaGhost {
+  border: 1px solid var(--line);
+  color: var(--paper);
+  background: transparent;
+}
+
+.ctaGhost:hover {
+  border-color: var(--signal);
+  color: var(--signal);
+}
+
+.heroVisual {
+  position: relative;
+  background:
+    linear-gradient(160deg, rgba(12, 14, 18, 0.2), rgba(12, 14, 18, 0.75)),
+    url("https://images.unsplash.com/photo-1574717024653-61fd2cf4d44d?w=1800&q=80")
+      center / cover no-repeat;
+  transform-origin: left center;
+  animation: rise 1s ease 0.1s both;
+}
+
+.heroVisual::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 18%;
+  height: 2px;
+  background: var(--signal);
+  transform-origin: left;
+  animation: sweep 1.1s ease 0.4s both;
+}
+
+.catalog {
+  grid-column: 2;
+  padding: 56px clamp(28px, 5vw, 72px) 80px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.catalogHead h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.6rem;
+}
+
+.catalogHead p {
+  margin: 8px 0 28px;
+  color: var(--mist);
+  max-width: 52ch;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 48px 1fr auto;
+  gap: 16px;
+  align-items: baseline;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--line);
+  animation: rise 0.55s ease both;
+}
+
+.row:hover .title {
+  color: var(--signal);
+}
+
+.idx {
+  font-family: var(--font-mono);
+  color: var(--mist);
+  font-size: 0.85rem;
+}
+
+.title {
+  font-size: 1.15rem;
+  font-weight: 600;
+  transition: color 0.2s ease;
+}
+
+.meta {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--mist);
+}
+
+.warn {
+  color: var(--danger);
+  font-family: var(--font-mono);
+}
+
+@media (max-width: 860px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .rail {
+    display: none;
+  }
+
+  .hero {
+    grid-template-columns: 1fr;
+    min-height: auto;
+  }
+
+  .heroVisual {
+    min-height: 42vh;
+    order: -1;
+  }
+
+  .catalog {
+    grid-column: 1;
+  }
+}
