@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import random
+import re
 import sys
 import threading
 import time
@@ -147,6 +148,282 @@ class ToolTip:
             font=self.font,
         ).pack()
         self._tip = tip
+
+
+class DetailPopup(tk.Toplevel):
+    """80% 屏幕大弹窗：查看/复制完整文本。"""
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        title: str,
+        text: str,
+        font: tkfont.Font,
+    ) -> None:
+        super().__init__(master)
+        self.title(title or "查看")
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = int(sw * 0.8), int(sh * 0.8)
+        x, y = (sw - w) // 2, (sh - h) // 2
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.minsize(640, 420)
+
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        head = ttk.Frame(self)
+        head.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
+        head.columnconfigure(0, weight=1)
+        ttk.Label(head, text=title or "", style="Title.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Button(head, text="复制", command=lambda: self._copy(text)).grid(
+            row=0, column=1, sticky="e"
+        )
+        ttk.Button(head, text="关闭", command=self.destroy).grid(
+            row=0, column=2, sticky="e", padx=(8, 0)
+        )
+
+        box = ttk.Frame(self)
+        box.grid(row=1, column=0, sticky="nsew", padx=14, pady=(4, 14))
+        box.columnconfigure(0, weight=1)
+        box.rowconfigure(0, weight=1)
+        txt = tk.Text(box, wrap=tk.WORD, font=font, state=tk.DISABLED)
+        txt.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(box, orient=tk.VERTICAL, command=txt.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        txt.configure(yscrollcommand=sb.set)
+        txt.configure(state=tk.NORMAL)
+        txt.insert("1.0", text or "")
+        txt.configure(state=tk.DISABLED)
+        self.txt = txt
+
+    def _copy(self, text: str) -> None:
+        self.clipboard_clear()
+        self.clipboard_append(text or "")
+
+
+# ----- 文本工具：重点提取 / 语音朗读 -----
+
+_KEY_MARKERS = (
+    "重点", "核心", "关键", "注意", "必须", "建议", "推荐", "千万",
+    "避免", "原则", "结论", "总结", "踩坑", "坑", "机制", "原理",
+    "因为", "所以", "确保", "容易", "典型", "最常见", "注意", "提示",
+)
+
+
+def _split_sentences(text: str) -> list[str]:
+    parts = re.split(r"(?<=[。！？!?；;])\s*", text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def extract_key_points(text: str, max_points: int = 8) -> list[str]:
+    """本地规则：优先要点行/编号行，再按关键词打分挑重点句。"""
+    text = (text or "").strip()
+    if not text:
+        return []
+    lines = [ln.strip() for ln in re.split(r"\n+", text) if ln.strip()]
+    bullets: list[str] = []
+    rest: list[str] = []
+    for ln in lines:
+        if re.match(r"^[-*•·]|\d+[\.\、\）)]|[①②③④⑤⑥⑦⑧⑨⑩]", ln):
+            bullets.append(ln)
+        else:
+            rest.append(ln)
+    sentences = [s for ln in rest for s in _split_sentences(ln)]
+    scored: list[tuple[int, str]] = []
+    for s in sentences:
+        score = sum(1 for mk in _KEY_MARKERS if mk in s)
+        score += min(len(s) // 40, 2)
+        if score:
+            scored.append((score, s))
+    scored.sort(key=lambda x: -x[0])
+    picked = [s for _, s in scored[:max_points]]
+    if not picked and not bullets:
+        picked = sentences[:3]
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in bullets[:max_points] + picked:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+        if len(result) >= max_points:
+            break
+    return result
+
+
+def strip_for_speech(text: str) -> str:
+    """朗读用：去掉标点，只保留汉字/字母/数字与空格。"""
+    cleaned = re.sub(r"[^\w\u4e00-\u9fff]+", " ", text or "", flags=re.UNICODE)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _tts_speak(text: str) -> None:
+    """系统语音朗读（已去标点）。优先 SAPI（win32com），回退 pyttsx3。"""
+    spoken = strip_for_speech(text)
+    if not spoken:
+        return
+    last: Exception | None = None
+    try:
+        import pythoncom
+        import win32com.client
+
+        pythoncom.CoInitialize()
+        try:
+            voice = win32com.client.Dispatch("SAPI.SpVoice")
+            voice.Speak(spoken)
+            return
+        finally:
+            pythoncom.CoUninitialize()
+    except Exception as e:  # noqa: BLE001
+        last = e
+    try:
+        import pyttsx3
+
+        engine = pyttsx3.init()
+        engine.say(spoken)
+        engine.runAndWait()
+        return
+    except Exception as e:  # noqa: BLE001
+        last = e
+    raise RuntimeError("未找到语音引擎（可运行 pip install pyttsx3 pywin32）") from last
+
+
+def lookup_browser(term: str, timeout: int = 12) -> str:
+    """浏览器侧摘要：Wikipedia + DuckDuckGo Instant Answer。"""
+    import json
+    import urllib.parse
+    import urllib.request
+
+    term = (term or "").strip()
+    if not term:
+        raise ValueError("查询词为空")
+
+    headers = {"User-Agent": "FRAME-InterviewTree/1.0 (desktop; lookup)"}
+    chunks: list[str] = []
+
+    for lang in ("zh", "en"):
+        url = (
+            f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/"
+            + urllib.parse.quote(term)
+        )
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            extract = (data.get("extract") or "").strip()
+            title = (data.get("title") or term).strip()
+            if extract:
+                chunks.append(f"【维基百科 · {title}】\n{extract}")
+                break
+        except Exception:
+            continue
+
+    ddg = (
+        "https://api.duckduckgo.com/?"
+        + urllib.parse.urlencode(
+            {"q": term, "format": "json", "no_html": 1, "skip_disambig": 1}
+        )
+    )
+    try:
+        req = urllib.request.Request(ddg, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        abstract = (data.get("AbstractText") or data.get("Definition") or "").strip()
+        if abstract:
+            chunks.append(f"【DuckDuckGo】\n{abstract}")
+        related = data.get("RelatedTopics") or []
+        for item in related[:3]:
+            if isinstance(item, dict) and item.get("Text"):
+                chunks.append(f"· {item['Text']}")
+            elif isinstance(item, dict) and isinstance(item.get("Topics"), list):
+                for sub in item["Topics"][:2]:
+                    if isinstance(sub, dict) and sub.get("Text"):
+                        chunks.append(f"· {sub['Text']}")
+    except Exception:
+        pass
+
+    if not chunks:
+        raise RuntimeError(
+            f"浏览器未查到「{term}」的简明摘要。可改用 AI 查询，或换更完整的英文术语。"
+        )
+    return "\n\n".join(chunks)
+
+
+def expand_term_at(widget: tk.Text, index: str) -> str:
+    """在点击位置向两侧扩展成词（中英数字混合）。"""
+    line_s, col_s = index.split(".")
+    line, col = int(line_s), int(col_s)
+    text = widget.get(f"{line}.0", f"{line}.end")
+    if not text:
+        return ""
+    if col >= len(text):
+        col = max(0, len(text) - 1)
+
+    def ok(ch: str) -> bool:
+        return bool(ch) and (
+            ch.isalnum() or "\u4e00" <= ch <= "\u9fff" or ch in "_-+./#"
+        )
+
+    if not ok(text[col]):
+        return ""
+    left = col
+    while left > 0 and ok(text[left - 1]):
+        left -= 1
+    right = col + 1
+    while right < len(text) and ok(text[right]):
+        right += 1
+    return text[left:right].strip(".-_/+#")
+
+
+class LookupChooser(tk.Toplevel):
+    """选择用 AI 还是浏览器查询某个词。"""
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        term: str,
+        on_ai: Callable[[], None],
+        on_browser: Callable[[], None],
+        font: tkfont.Font | None = None,
+    ) -> None:
+        super().__init__(master)
+        self.title("选择查询方式")
+        self.transient(master)
+        self.resizable(False, False)
+        self.grab_set()
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = 520, 220
+        self.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+
+        ttk.Label(self, text=f"查询词：{term}", font=font).pack(
+            padx=20, pady=(18, 8), anchor="w"
+        )
+        ttk.Label(
+            self,
+            text="请选择查询来源（确认后开始查询并展示结果）",
+            font=font,
+        ).pack(padx=20, pady=(0, 12), anchor="w")
+
+        row = ttk.Frame(self)
+        row.pack(fill=tk.X, padx=20, pady=8)
+        row.columnconfigure((0, 1), weight=1)
+
+        def pick_ai() -> None:
+            self.destroy()
+            on_ai()
+
+        def pick_browser() -> None:
+            self.destroy()
+            on_browser()
+
+        ttk.Button(row, text="AI 查询（DeepSeek）", command=pick_ai).grid(
+            row=0, column=0, sticky="ew", padx=(0, 6)
+        )
+        ttk.Button(row, text="浏览器查询", command=pick_browser).grid(
+            row=0, column=1, sticky="ew", padx=(6, 0)
+        )
+        ttk.Button(self, text="取消", command=self.destroy).pack(pady=(4, 14))
 
 
 class QuizWindow(tk.Toplevel):
@@ -309,6 +586,10 @@ class App(tk.Tk):
         self._filter_query = ""
         self._task_start = 0.0
         self._ticker_id: str | None = None
+        self._speaking = False
+        self._term_cache: dict[str, str] = {}
+        self._term_tip_win: tk.Toplevel | None = None
+        self._hover_fetching: set[str] = set()
 
         self._setup_fonts()
         self._build_ui()
@@ -463,10 +744,24 @@ class App(tk.Tk):
         )
         self._button(
             jd_header,
+            "弹窗",
+            lambda: self._open_detail("职位描述", self.jd_edit.get("1.0", "end-1c")),
+            "在新窗口（80% 屏幕）查看职位描述完整内容；双击输入框也可打开。",
+        ).grid(row=0, column=1, sticky="e", padx=2)
+        self._button(
+            jd_header,
             "一键粘贴",
             self.on_paste_jd,
             "用系统剪贴板内容整段替换职位描述框（先复制 JD，再点此按钮）。",
-        ).grid(row=0, column=1, sticky="e")
+        ).grid(row=0, column=2, sticky="e", padx=2)
+        self.btn_extra_toggle = self._button(
+            jd_header,
+            "补充 ▾",
+            self.on_toggle_extra,
+            "展开/收起「生成补充说明」输入区（默认隐藏，避免挤压职位描述）。",
+        )
+        self.btn_extra_toggle.grid(row=0, column=3, sticky="e")
+
         jd_box = ttk.Frame(left)
         jd_box.grid(row=3, column=0, sticky="nsew")
         jd_box.columnconfigure(0, weight=1)
@@ -479,12 +774,26 @@ class App(tk.Tk):
         jd_scroll = ttk.Scrollbar(jd_box, orient=tk.VERTICAL, command=self.jd_edit.yview)
         jd_scroll.grid(row=0, column=1, sticky="ns")
         self.jd_edit.configure(yscrollcommand=jd_scroll.set)
+        self._bind_double_open(self.jd_edit, "职位描述")
 
-        ttk.Label(left, text="生成补充说明（可选）").grid(row=4, column=0, sticky="w", pady=(6, 2))
+        # 补充说明：默认隐藏，点「补充」才展开
+        self._extra_visible = False
+        self.extra_header = ttk.Frame(left)
+        self.extra_header.columnconfigure(0, weight=1)
+        ttk.Label(self.extra_header, text="生成补充说明（可选）").grid(
+            row=0, column=0, sticky="w"
+        )
+        self._button(
+            self.extra_header,
+            "弹窗",
+            lambda: self._open_detail("生成补充说明", self.extra_edit.get("1.0", "end-1c")),
+            "在新窗口（80% 屏幕）查看补充说明；双击输入框也可打开。",
+        ).grid(row=0, column=1, sticky="e")
         self.extra_edit = tk.Text(
             left, height=3, wrap=tk.WORD, font=self.font_input, undo=True, width=36
         )
-        self.extra_edit.grid(row=5, column=0, sticky="ew")
+        self._bind_double_open(self.extra_edit, "生成补充说明")
+        # 不 grid，默认不显示
 
         spin_row = ttk.Frame(left)
         spin_row.grid(row=6, column=0, sticky="ew", pady=6)
@@ -677,13 +986,50 @@ class App(tk.Tk):
         ttk.Label(right, text="当前节点", style="Title.TLabel").grid(
             row=0, column=0, sticky="w"
         )
-        ttk.Label(right, text="问题").grid(row=1, column=0, sticky="w", pady=(6, 2))
+        q_header = ttk.Frame(right)
+        q_header.grid(row=1, column=0, sticky="ew", pady=(6, 2))
+        q_header.columnconfigure(0, weight=1)
+        ttk.Label(q_header, text="问题").grid(row=0, column=0, sticky="w")
+        self._button(
+            q_header,
+            "弹窗",
+            lambda: self._open_detail("问题", self.q_edit.get("1.0", "end-1c")),
+            "在新窗口（80% 屏幕）查看问题完整内容；双击输入框也可打开。",
+        ).grid(row=0, column=1, sticky="e")
         self.q_edit = tk.Text(
             right, height=4, wrap=tk.WORD, font=self.font_input, undo=True, width=40
         )
         self.q_edit.grid(row=2, column=0, sticky="ew")
+        self._bind_double_open(self.q_edit, "问题")
 
-        ttk.Label(right, text="参考答案").grid(row=3, column=0, sticky="w", pady=(6, 2))
+        ans_header = ttk.Frame(right)
+        ans_header.grid(row=3, column=0, sticky="ew", pady=(6, 2))
+        ans_header.columnconfigure(0, weight=1)
+        ttk.Label(ans_header, text="参考答案").grid(row=0, column=0, sticky="w")
+        self._button(
+            ans_header,
+            "弹窗",
+            lambda: self._open_detail("参考答案", self.a_edit.get("1.0", "end-1c")),
+            "在新窗口（80% 屏幕）查看答案完整内容；双击输入框也可打开。",
+        ).grid(row=0, column=1, sticky="e", padx=4)
+        self._button(
+            ans_header,
+            "查看重点",
+            self.on_key_points,
+            "从答案中提取重点句/要点，在新窗口一键查看（本地规则，无需联网）。",
+        ).grid(row=0, column=2, sticky="e", padx=2)
+        self._button(
+            ans_header,
+            "查询",
+            self.on_lookup_selection,
+            "先在答案里划选名词/术语，再点此按钮；也可双击词，或右键选择 AI / 浏览器查询。",
+        ).grid(row=0, column=3, sticky="e", padx=2)
+        self._button(
+            ans_header,
+            "朗读",
+            self.on_speak,
+            "用系统语音朗读当前答案（自动跳过标点符号）。",
+        ).grid(row=0, column=4, sticky="e")
         ans_box = ttk.Frame(right)
         ans_box.grid(row=4, column=0, sticky="nsew")
         right.rowconfigure(4, weight=1)
@@ -696,6 +1042,7 @@ class App(tk.Tk):
         ans_scroll = ttk.Scrollbar(ans_box, orient=tk.VERTICAL, command=self.a_edit.yview)
         ans_scroll.grid(row=0, column=1, sticky="ns")
         self.a_edit.configure(yscrollcommand=ans_scroll.set)
+        self._setup_answer_lookup(self.a_edit)
 
         ttk.Label(right, text="标签（逗号分隔）").grid(row=5, column=0, sticky="w", pady=(6, 2))
         self.tags_edit = tk.Entry(right, font=self.font_input)
@@ -757,6 +1104,19 @@ class App(tk.Tk):
         self.bind_all("<F5>", lambda _e: self.on_refresh())
 
     # ----- helpers -----
+    def on_toggle_extra(self) -> None:
+        self._extra_visible = not self._extra_visible
+        if self._extra_visible:
+            self.extra_header.grid(row=4, column=0, sticky="ew", pady=(6, 2))
+            self.extra_edit.grid(row=5, column=0, sticky="ew")
+            self.btn_extra_toggle.configure(text="补充 ▴")
+            self.status.set("已展开补充说明输入区")
+        else:
+            self.extra_header.grid_remove()
+            self.extra_edit.grid_remove()
+            self.btn_extra_toggle.configure(text="补充 ▾")
+            self.status.set("已收起补充说明输入区")
+
     def on_paste_jd(self) -> None:
         try:
             text = self.clipboard_get()
@@ -930,6 +1290,283 @@ class App(tk.Tk):
     def _update_stats(self) -> None:
         s = tree_stats(self.tree_data)
         self.stats_var.set(f"共 {s['total']} 题 · 一级 {s['roots']} · 标签 {s['tags']}")
+
+    # ----- 弹窗 / 朗读 / 重点 -----
+    def _open_detail(self, title: str, text: str, font: tkfont.Font | None = None) -> None:
+        DetailPopup(self, title, text, font or self.font_body)
+
+    def _bind_double_open(self, widget: tk.Misc, title: str) -> None:
+        def _h(_event: object) -> str:
+            text = widget.get("1.0", "end-1c")  # type: ignore[attr-defined]
+            self._open_detail(title, text)
+            return "break"
+
+        widget.bind("<Double-Button-1>", _h)
+
+    def on_key_points(self) -> None:
+        text = self.a_edit.get("1.0", "end-1c").strip()
+        if not text:
+            messagebox.showinfo("查看重点", "当前节点没有答案")
+            return
+        points = extract_key_points(text)
+        if not points:
+            messagebox.showinfo("查看重点", "未能提取出重点（答案过短）")
+            return
+        rendered = "\n".join(f"• {p}" for p in points)
+        self._open_detail("参考答案 · 重点", rendered, self.font_body)
+
+    def on_speak(self) -> None:
+        text = self.a_edit.get("1.0", "end-1c").strip()
+        if not text:
+            messagebox.showinfo("朗读", "当前节点没有答案可朗读")
+            return
+        if self._speaking:
+            messagebox.showinfo("朗读", "正在朗读中，请稍候")
+            return
+        self._speaking = True
+        self.status.set("正在朗读…")
+
+        def worker() -> None:
+            try:
+                _tts_speak(text)
+            except Exception as e:  # noqa: BLE001
+                self.after(0, lambda m=str(e): self._speak_done(False, m))
+                return
+            self.after(0, lambda: self._speak_done(True, ""))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _speak_done(self, ok: bool, msg: str) -> None:
+        self._speaking = False
+        if ok:
+            self.status.set("朗读完成")
+        else:
+            self.status.set("朗读失败")
+            messagebox.showerror("朗读失败", msg)
+
+    # ----- 划词查询（AI / 浏览器） -----
+    def _setup_answer_lookup(self, widget: tk.Text) -> None:
+        def on_double(event: tk.Event) -> str:  # type: ignore[type-arg]
+            term = ""
+            try:
+                term = widget.get(tk.SEL_FIRST, tk.SEL_LAST).strip()
+            except tk.TclError:
+                pass
+            if not term:
+                idx = widget.index(f"@{event.x},{event.y}")
+                term = expand_term_at(widget, idx)
+            if term:
+                self._choose_lookup(term)
+            return "break"
+
+        def on_right(event: tk.Event) -> str:  # type: ignore[type-arg]
+            term = ""
+            try:
+                term = widget.get(tk.SEL_FIRST, tk.SEL_LAST).strip()
+            except tk.TclError:
+                pass
+            if not term:
+                idx = widget.index(f"@{event.x},{event.y}")
+                term = expand_term_at(widget, idx)
+            menu = tk.Menu(widget, tearoff=0)
+            if term:
+                menu.add_command(
+                    label=f"AI 查询「{term[:20]}」",
+                    command=lambda t=term: self._run_lookup(t, "ai"),
+                )
+                menu.add_command(
+                    label=f"浏览器查询「{term[:20]}」",
+                    command=lambda t=term: self._run_lookup(t, "browser"),
+                )
+                menu.add_separator()
+            menu.add_command(
+                label="弹窗打开全文",
+                command=lambda: self._open_detail(
+                    "参考答案", widget.get("1.0", "end-1c")
+                ),
+            )
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+            return "break"
+
+        widget.bind("<Double-Button-1>", on_double)
+        widget.bind("<Button-3>", on_right)
+
+    def _term_tag(self, term: str) -> str:
+        import hashlib
+
+        return "lt_" + hashlib.md5(term.encode("utf-8")).hexdigest()[:12]
+
+    def _current_selection_term(self) -> str:
+        try:
+            return self.a_edit.get(tk.SEL_FIRST, tk.SEL_LAST).strip()
+        except tk.TclError:
+            return ""
+
+    def on_lookup_selection(self) -> None:
+        term = self._current_selection_term()
+        if not term:
+            messagebox.showinfo(
+                "划词查询",
+                "请先在答案里划选要查的名词/术语，或双击某个词。",
+            )
+            return
+        self._choose_lookup(term)
+
+    def _choose_lookup(self, term: str) -> None:
+        term = (term or "").strip()
+        if not term:
+            return
+        if len(term) > 80:
+            messagebox.showinfo("划词查询", "选区过长，请只选一个词或短语（建议 ≤80 字）")
+            return
+        LookupChooser(
+            self,
+            term,
+            on_ai=lambda: self._run_lookup(term, "ai"),
+            on_browser=lambda: self._run_lookup(term, "browser"),
+            font=self.font_ui,
+        )
+
+    def _run_lookup(self, term: str, mode: str) -> None:
+        term = term.strip()
+        if not term:
+            return
+        self.status.set(f"正在查询「{term}」…")
+        self._persist_cfg()
+
+        def job() -> tuple[str, str]:
+            if mode == "ai":
+                content = chat(
+                    api_key=self.cfg["api_key"],
+                    base_url=self.cfg["base_url"],
+                    model=self.cfg["model"],
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "你是技术名词解释助手。用简洁中文解释术语，先一句结论，再给 2~4 条要点，不要废话。",
+                        },
+                        {
+                            "role": "user",
+                            "content": f"请解释这个词/短语（面试语境）：{term}",
+                        },
+                    ],
+                    timeout=60,
+                    max_tokens=800,
+                )
+                return mode, content
+            text = lookup_browser(term)
+            return mode, text
+
+        def ok(pair: tuple[str, str]) -> None:
+            m, text = pair
+            if m == "browser":
+                self._term_cache[term] = text
+            elif term not in self._term_cache:
+                self._prefetch_browser_tip(term)
+            self._highlight_term(term)
+            title = f"查询「{term}」· {'AI' if m == 'ai' else '浏览器'}"
+            self._open_detail(title, text)
+            self.status.set(f"已完成查询：{term}")
+
+        self._run_bg(job, ok)
+
+    def _prefetch_browser_tip(self, term: str) -> None:
+        if term in self._term_cache or term in self._hover_fetching:
+            return
+        self._hover_fetching.add(term)
+
+        def worker() -> None:
+            try:
+                text = lookup_browser(term)
+            except Exception:
+                self.after(0, lambda: self._hover_fetching.discard(term))
+                return
+            self.after(0, lambda: self._cache_browser(term, text))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _cache_browser(self, term: str, text: str) -> None:
+        self._term_cache[term] = text
+        self._hover_fetching.discard(term)
+        self._highlight_term(term)
+
+    def _highlight_term(self, term: str) -> None:
+        if not term:
+            return
+        tag = self._term_tag(term)
+        self.a_edit.tag_configure(tag, foreground="#0b5cad", underline=True)
+        self.a_edit.tag_remove(tag, "1.0", tk.END)
+        start = "1.0"
+        while True:
+            pos = self.a_edit.search(term, start, stopindex=tk.END)
+            if not pos:
+                break
+            end = f"{pos}+{len(term)}c"
+            self.a_edit.tag_add(tag, pos, end)
+            start = end
+        self.a_edit.tag_bind(tag, "<Enter>", lambda e, t=term: self._on_term_enter(e, t))
+        self.a_edit.tag_bind(tag, "<Leave>", lambda _e: self._hide_term_tip())
+
+    def _reapply_term_highlights(self) -> None:
+        body = self.a_edit.get("1.0", "end-1c")
+        for term in list(self._term_cache.keys()):
+            if term and term in body:
+                self._highlight_term(term)
+
+    def _on_term_enter(self, event: tk.Event, term: str) -> None:  # type: ignore[type-arg]
+        tip = self._term_cache.get(term)
+        if tip:
+            self._show_term_tip(event, tip)
+            return
+        self._show_term_tip(event, f"正在从浏览器查询「{term}」…")
+        self._prefetch_browser_tip(term)
+
+        def poll(n: int = 0) -> None:
+            if term in self._term_cache:
+                self._show_term_tip(event, self._term_cache[term])
+                return
+            if n < 20:
+                self.after(300, lambda: poll(n + 1))
+
+        self.after(300, lambda: poll(0))
+
+    def _show_term_tip(self, event: tk.Event, text: str) -> None:  # type: ignore[type-arg]
+        self._hide_term_tip()
+        tip = tk.Toplevel(self)
+        tip.wm_overrideredirect(True)
+        try:
+            tip.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        tip.geometry(f"+{event.x_root + 12}+{event.y_root + 16}")
+        preview = (text or "").strip()
+        if len(preview) > 420:
+            preview = preview[:420] + "…"
+        tk.Label(
+            tip,
+            text=preview,
+            justify=tk.LEFT,
+            background="#FFF8DC",
+            foreground="#1a1a1a",
+            relief=tk.SOLID,
+            borderwidth=1,
+            padx=10,
+            pady=8,
+            wraplength=480,
+            font=self.font_tip,
+        ).pack()
+        self._term_tip_win = tip
+
+    def _hide_term_tip(self) -> None:
+        if self._term_tip_win is not None:
+            try:
+                self._term_tip_win.destroy()
+            except tk.TclError:
+                pass
+            self._term_tip_win = None
 
     # ----- 复制 / 刷题 / 撤销 / 导出 -----
     def _selected_node(self) -> dict[str, Any] | None:
@@ -1128,6 +1765,7 @@ class App(tk.Tk):
         self.a_edit.insert("1.0", node.get("answer") or "")
         self.tags_edit.delete(0, tk.END)
         self.tags_edit.insert(0, ", ".join(node.get("tags") or []))
+        self._reapply_term_highlights()
 
     def on_apply(self) -> None:
         node_id = self._selected_node_id()

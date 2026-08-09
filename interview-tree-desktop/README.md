@@ -15,10 +15,13 @@
 7. **树内搜索**：按题干 / 答案 / 标签过滤整棵树（Ctrl+F 聚焦搜索框）  
 8. **刷题模式**：隐藏答案逐题背诵，随机抽题 / 上一题 / 下一题  
 9. **复制答案 / 问答**：一键复制到剪贴板（Ctrl+Shift+A / Ctrl+Shift+C）  
-10. **导出**：Markdown、HTML、PDF（PDF 内置中文字体）  
-11. **自动备份**：每次保存前自动保留上一版 `*.bak`  
-12. **离线可用**：无 Key 时可点「离线种子树」先练；之后再同步升级  
-13. **本地保存**：`data/config.json`、`data/interview_tree.json`、`data/trees.json`  
+10. **详情弹窗**：每个输入/输出框都有「弹窗」按钮，双击也可打开 80% 屏幕大窗口查看完整内容  
+11. **答案重点 + 朗读**：参考答案支持「查看重点」与「朗读」（自动跳过标点）  
+12. **划词查询**：在答案中双击/划选名词 → 选择 AI 或浏览器查询；查过的词会高亮，悬停显示浏览器摘要  
+13. **导出**：Markdown、HTML、PDF（PDF 内置中文字体）  
+14. **自动备份**：每次保存前自动保留上一版 `*.bak`  
+15. **离线可用**：无 Key 时可点「离线种子树」先练；之后再同步升级  
+16. **本地保存**：`data/config.json`、`data/interview_tree.json`、`data/trees.json`  
 
 快捷键：`Ctrl+F` 搜索 · `F5` 刷新题树 · `Ctrl+Shift+A` 复制答案 · `Ctrl+Shift+C` 复制问答
 
@@ -82,4 +85,4 @@ EXE 与 `data/` 同级时，配置会写在 EXE 旁的 `data/`（见下方说明
 - API Key 只存在本地，不会上传到本仓库  
 - 生成/展开耗时取决于 DeepSeek；请勿重复连点；后台任务会显示已等待秒数  
 - 模型需支持较长 JSON 输出；默认 `deepseek-chat`  
-- 导出 PDF 需要 `reportlab`（`requirements.txt` 已包含，启动脚本会自动安装）  
+- 导出 PDF 需要 `reportlab`；朗读需要 `pyttsx3` / `pywin32`（`requirements.txt` 已包含，启动脚本会自动安装）  

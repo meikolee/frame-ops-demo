@@ -25,6 +25,10 @@ Write-Host "Using Python: $Python"
   --hidden-import prompts `
   --hidden-import tree_store `
   --hidden-import deepseek_client `
+  --hidden-import win32com.client `
+  --hidden-import pythoncom `
+  --hidden-import pyttsx3 `
+  --hidden-import reportlab `
   app.py
 
 $src = Join-Path $Dist 'FrameInterviewTree.exe'
