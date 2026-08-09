@@ -1,4 +1,4 @@
-# Build onefile EXE into interview-tree-desktop/dist and project folder
+# Build onefile EXE (tkinter, no PySide6)
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
@@ -21,7 +21,6 @@ Write-Host "Using Python: $Python"
   --distpath $Dist `
   --workpath (Join-Path $Root 'build') `
   --specpath (Join-Path $Root 'build') `
-  --collect-all PySide6 `
   --hidden-import defaults `
   --hidden-import prompts `
   --hidden-import tree_store `

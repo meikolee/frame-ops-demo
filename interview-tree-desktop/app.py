@@ -1,37 +1,18 @@
 # -*- coding: utf-8 -*-
-"""FRAME 岗位面试题树 — DeepSeek 可生长桌面端。"""
+"""FRAME 岗位面试题树 — DeepSeek 可生长桌面端（tkinter，无 Qt 依赖）。"""
 
 from __future__ import annotations
 
 import sys
-import traceback
+import threading
+import tkinter as tk
+import tkinter.font as tkfont
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QFont, QAction
-from PySide6.QtWidgets import (
-    QApplication,
-    QFileDialog,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMainWindow,
-    QMessageBox,
-    QPlainTextEdit,
-    QPushButton,
-    QSplitter,
-    QStatusBar,
-    QTreeWidget,
-    QTreeWidgetItem,
-    QVBoxLayout,
-    QWidget,
-    QFormLayout,
-    QSpinBox,
-    QGroupBox,
-)
-
 from defaults import DEFAULT_BASE_URL, DEFAULT_JD, DEFAULT_MODEL
-from deepseek_client import DeepSeekError, chat, test_connection
+from deepseek_client import chat, test_connection
 from prompts import (
     build_expand_messages,
     build_generate_messages,
@@ -46,6 +27,7 @@ from tree_store import (
     find_node,
     load_config,
     load_tree,
+    normalize_tree,
     path_to_node,
     replace_node_content,
     save_config,
@@ -55,241 +37,289 @@ from tree_store import (
 )
 
 
-class Worker(QThread):
-    finished_ok = Signal(object)
-    finished_err = Signal(str)
-    progress = Signal(str)
+def enable_windows_dpi_awareness() -> None:
+    """Avoid blurry bitmap-scaled UI on HiDPI Windows displays."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
 
-    def __init__(self, fn: Callable[[], Any]) -> None:
-        super().__init__()
-        self._fn = fn
-
-    def run(self) -> None:
+        # Per-monitor v2 when available; fall back to system DPI aware.
         try:
-            self.finished_ok.emit(self._fn())
-        except Exception as e:  # noqa: BLE001 — surface to UI
-            self.finished_err.emit(f"{e}\n\n{traceback.format_exc(limit=4)}")
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 
-class MainWindow(QMainWindow):
+def pick_ui_font_family(root: tk.Misc) -> str:
+    available = {name.lower(): name for name in tkfont.families(root)}
+    for candidate in (
+        "Microsoft YaHei UI",
+        "Microsoft YaHei",
+        "Segoe UI Variable",
+        "Segoe UI",
+        "PingFang SC",
+        "Noto Sans CJK SC",
+    ):
+        if candidate.lower() in available:
+            return available[candidate.lower()]
+    return "TkDefaultFont"
+
+
+class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("FRAME 面试题树 · DeepSeek")
-        self.resize(1280, 820)
+        self.title("FRAME 面试题树 · DeepSeek")
+        self.geometry("1280x820")
+        self.minsize(960, 640)
+        try:
+            self.tk.call("tk", "scaling", 1.25)
+        except tk.TclError:
+            pass
 
         self.tree_data = load_tree()
         self.cfg = load_config()
         if not self.cfg.get("jd_text"):
             self.cfg["jd_text"] = DEFAULT_JD
 
-        self._worker: Worker | None = None
-        self._item_by_id: dict[str, QTreeWidgetItem] = {}
+        self._busy = False
+        self._iid_to_id: dict[str, str] = {}
+        self._id_to_iid: dict[str, str] = {}
 
+        self._setup_fonts()
         self._build_ui()
-        self._reload_tree_widget()
-        self.statusBar().showMessage(f"本地文件：{tree_path()}")
+        self._reload_tree()
+        self.status.set(f"本地文件：{tree_path()}")
+
+        if not (self.tree_data.get("nodes") or []):
+            self.on_offline_seed()
+
+    def _setup_fonts(self) -> None:
+        family = pick_ui_font_family(self)
+        self.font_ui = tkfont.Font(family=family, size=11)
+        self.font_ui_bold = tkfont.Font(family=family, size=12, weight="bold")
+        self.font_body = tkfont.Font(family=family, size=12)
+        self.font_tree = tkfont.Font(family=family, size=11)
+        self.font_status = tkfont.Font(family=family, size=10)
+
+        style = ttk.Style(self)
+        try:
+            style.theme_use("vista")
+        except tk.TclError:
+            try:
+                style.theme_use("winnative")
+            except tk.TclError:
+                pass
+
+        style.configure(".", font=self.font_ui)
+        style.configure("TLabel", font=self.font_ui)
+        style.configure("TButton", font=self.font_ui)
+        style.configure("TEntry", font=self.font_ui)
+        style.configure("TSpinbox", font=self.font_ui)
+        style.configure("Treeview", font=self.font_tree, rowheight=28)
+        style.configure("Treeview.Heading", font=self.font_ui_bold)
+        style.configure("Title.TLabel", font=self.font_ui_bold)
 
     # ----- UI -----
     def _build_ui(self) -> None:
-        root = QWidget()
-        self.setCentralWidget(root)
-        layout = QHBoxLayout(root)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        layout.addWidget(splitter)
+        paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
+        paned.grid(row=0, column=0, sticky="nsew")
 
-        left = QWidget()
-        left_l = QVBoxLayout(left)
+        left = ttk.Frame(paned, padding=8)
+        mid = ttk.Frame(paned, padding=8)
+        right = ttk.Frame(paned, padding=8)
+        paned.add(left, weight=2)
+        paned.add(mid, weight=3)
+        paned.add(right, weight=2)
 
-        cfg_box = QGroupBox("DeepSeek 接入")
-        form = QFormLayout(cfg_box)
-        self.api_key = QLineEdit(self.cfg.get("api_key", ""))
-        self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_key.setPlaceholderText("sk-...")
-        self.base_url = QLineEdit(self.cfg.get("base_url") or DEFAULT_BASE_URL)
-        self.model = QLineEdit(self.cfg.get("model") or DEFAULT_MODEL)
-        form.addRow("API Key", self.api_key)
-        form.addRow("Base URL", self.base_url)
-        form.addRow("Model", self.model)
-        test_btn = QPushButton("测试连接")
-        test_btn.clicked.connect(self.on_test_connection)
-        form.addRow("", test_btn)
-        left_l.addWidget(cfg_box)
+        # left: config + JD
+        ttk.Label(left, text="DeepSeek 接入", style="Title.TLabel").pack(anchor="w")
+        form = ttk.Frame(left)
+        form.pack(fill=tk.X, pady=4)
+        ttk.Label(form, text="API Key").grid(row=0, column=0, sticky="w")
+        self.api_key = ttk.Entry(form, show="*")
+        self.api_key.insert(0, self.cfg.get("api_key", ""))
+        self.api_key.grid(row=0, column=1, sticky="ew", pady=2)
+        ttk.Label(form, text="Base URL").grid(row=1, column=0, sticky="w")
+        self.base_url = ttk.Entry(form)
+        self.base_url.insert(0, self.cfg.get("base_url") or DEFAULT_BASE_URL)
+        self.base_url.grid(row=1, column=1, sticky="ew", pady=2)
+        ttk.Label(form, text="Model").grid(row=2, column=0, sticky="w")
+        self.model = ttk.Entry(form)
+        self.model.insert(0, self.cfg.get("model") or DEFAULT_MODEL)
+        self.model.grid(row=2, column=1, sticky="ew", pady=2)
+        form.columnconfigure(1, weight=1)
+        ttk.Button(left, text="测试连接", command=self.on_test).pack(anchor="w", pady=4)
 
-        jd_box = QGroupBox("职位描述（可编辑后解析）")
-        jd_l = QVBoxLayout(jd_box)
-        self.jd_edit = QPlainTextEdit(self.cfg.get("jd_text") or DEFAULT_JD)
-        self.jd_edit.setPlaceholderText("粘贴 JD…")
-        jd_l.addWidget(self.jd_edit)
-        left_l.addWidget(jd_box, stretch=1)
+        ttk.Label(left, text="职位描述（可编辑后解析）", style="Title.TLabel").pack(
+            anchor="w", pady=(10, 2)
+        )
+        self.jd_edit = tk.Text(left, height=14, wrap=tk.WORD, font=self.font_body, undo=True)
+        self.jd_edit.insert("1.0", self.cfg.get("jd_text") or DEFAULT_JD)
+        self.jd_edit.pack(fill=tk.BOTH, expand=True)
 
-        extra_box = QGroupBox("生成补充说明（可选）")
-        extra_l = QVBoxLayout(extra_box)
-        self.extra_edit = QPlainTextEdit()
-        self.extra_edit.setPlaceholderText("例如：更偏 NestJS 与 SQL；答案控制在 2 分钟口述量")
-        self.extra_edit.setFixedHeight(70)
-        extra_l.addWidget(self.extra_edit)
-        left_l.addWidget(extra_box)
+        ttk.Label(left, text="生成补充说明（可选）").pack(anchor="w", pady=(8, 2))
+        self.extra_edit = tk.Text(left, height=3, wrap=tk.WORD, font=self.font_body, undo=True)
+        self.extra_edit.pack(fill=tk.X)
 
-        expand_row = QHBoxLayout()
-        expand_row.addWidget(QLabel("每次展开子题数"))
-        self.expand_count = QSpinBox()
-        self.expand_count.setRange(1, 6)
-        self.expand_count.setValue(3)
-        expand_row.addWidget(self.expand_count)
-        expand_row.addStretch(1)
-        left_l.addLayout(expand_row)
+        row = ttk.Frame(left)
+        row.pack(fill=tk.X, pady=6)
+        ttk.Label(row, text="每次展开子题数").pack(side=tk.LEFT)
+        self.expand_count = tk.IntVar(value=3)
+        ttk.Spinbox(row, from_=1, to=6, textvariable=self.expand_count, width=5).pack(
+            side=tk.LEFT, padx=6
+        )
 
-        btn_row1 = QHBoxLayout()
-        self.btn_generate = QPushButton("① 解析 JD 并生成题树")
-        self.btn_generate.clicked.connect(self.on_generate)
-        self.btn_offline = QPushButton("离线种子树")
-        self.btn_offline.clicked.connect(self.on_offline_seed)
-        btn_row1.addWidget(self.btn_generate)
-        btn_row1.addWidget(self.btn_offline)
-        left_l.addLayout(btn_row1)
+        self.btn_generate = ttk.Button(left, text="① 解析 JD 并生成题树", command=self.on_generate)
+        self.btn_generate.pack(fill=tk.X, pady=2)
+        self.btn_offline = ttk.Button(left, text="离线种子树", command=self.on_offline_seed)
+        self.btn_offline.pack(fill=tk.X, pady=2)
+        self.btn_expand = ttk.Button(left, text="② 展开选中节点（生长）", command=self.on_expand)
+        self.btn_expand.pack(fill=tk.X, pady=2)
+        self.btn_sync = ttk.Button(left, text="③ 联网同步选中节点", command=self.on_sync)
+        self.btn_sync.pack(fill=tk.X, pady=2)
 
-        btn_row2 = QHBoxLayout()
-        self.btn_expand = QPushButton("② 展开选中节点（生长）")
-        self.btn_expand.clicked.connect(self.on_expand)
-        self.btn_sync = QPushButton("③ 联网同步选中节点")
-        self.btn_sync.clicked.connect(self.on_sync)
-        btn_row2.addWidget(self.btn_expand)
-        btn_row2.addWidget(self.btn_sync)
-        left_l.addLayout(btn_row2)
+        row2 = ttk.Frame(left)
+        row2.pack(fill=tk.X, pady=6)
+        self.btn_save = ttk.Button(row2, text="保存到本地", command=self.on_save)
+        self.btn_save.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
+        self.btn_export = ttk.Button(row2, text="导出 Markdown", command=self.on_export)
+        self.btn_export.pack(side=tk.LEFT, expand=True, fill=tk.X)
 
-        btn_row3 = QHBoxLayout()
-        self.btn_save = QPushButton("保存到本地")
-        self.btn_save.clicked.connect(self.on_save)
-        self.btn_export = QPushButton("导出 Markdown")
-        self.btn_export.clicked.connect(self.on_export)
-        btn_row3.addWidget(self.btn_save)
-        btn_row3.addWidget(self.btn_export)
-        left_l.addLayout(btn_row3)
+        # mid: tree
+        ttk.Label(
+            mid, text="面试题树（点选后右侧可编辑，可向下生长）", style="Title.TLabel"
+        ).pack(anchor="w")
+        tree_wrap = ttk.Frame(mid)
+        tree_wrap.pack(fill=tk.BOTH, expand=True, pady=4)
+        self.tree = ttk.Treeview(
+            tree_wrap,
+            columns=("tags", "kids"),
+            show="tree headings",
+            selectmode="browse",
+        )
+        self.tree.heading("#0", text="问题")
+        self.tree.heading("tags", text="标签")
+        self.tree.heading("kids", text="子节点")
+        self.tree.column("#0", width=420, stretch=True)
+        self.tree.column("tags", width=140, stretch=False)
+        self.tree.column("kids", width=60, stretch=False, anchor="center")
+        ysb = ttk.Scrollbar(tree_wrap, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=ysb.set)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ysb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self.on_select())
 
-        splitter.addWidget(left)
+        # right: editor
+        ttk.Label(right, text="当前节点", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(right, text="问题").pack(anchor="w")
+        self.q_edit = tk.Text(right, height=4, wrap=tk.WORD, font=self.font_body, undo=True)
+        self.q_edit.pack(fill=tk.X, pady=2)
+        ttk.Label(right, text="参考答案").pack(anchor="w")
+        self.a_edit = tk.Text(right, wrap=tk.WORD, font=self.font_body, undo=True)
+        self.a_edit.pack(fill=tk.BOTH, expand=True, pady=2)
+        ttk.Label(right, text="标签（逗号分隔）").pack(anchor="w")
+        self.tags_edit = ttk.Entry(right)
+        self.tags_edit.pack(fill=tk.X, pady=2)
+        ttk.Button(right, text="写回当前节点（本地）", command=self.on_apply).pack(
+            fill=tk.X, pady=4
+        )
+        ttk.Button(right, text="删除当前节点", command=self.on_delete).pack(fill=tk.X)
 
-        mid = QWidget()
-        mid_l = QVBoxLayout(mid)
-        mid_l.addWidget(QLabel("面试题树（点击节点编辑右侧答案；可不断向下生长）"))
-        self.tree_widget = QTreeWidget()
-        self.tree_widget.setHeaderLabels(["问题", "标签", "子节点"])
-        self.tree_widget.itemSelectionChanged.connect(self.on_select)
-        self.tree_widget.setColumnWidth(0, 420)
-        mid_l.addWidget(self.tree_widget)
-        splitter.addWidget(mid)
-
-        right = QWidget()
-        right_l = QVBoxLayout(right)
-        right_l.addWidget(QLabel("当前节点"))
-        self.q_edit = QPlainTextEdit()
-        self.q_edit.setFixedHeight(90)
-        right_l.addWidget(QLabel("问题"))
-        right_l.addWidget(self.q_edit)
-        right_l.addWidget(QLabel("参考答案"))
-        self.a_edit = QPlainTextEdit()
-        right_l.addWidget(self.a_edit, stretch=1)
-        self.tags_edit = QLineEdit()
-        self.tags_edit.setPlaceholderText("标签，逗号分隔")
-        right_l.addWidget(self.tags_edit)
-        apply_btn = QPushButton("写回当前节点（本地）")
-        apply_btn.clicked.connect(self.on_apply_node)
-        right_l.addWidget(apply_btn)
-        del_btn = QPushButton("删除当前节点")
-        del_btn.clicked.connect(self.on_delete_node)
-        right_l.addWidget(del_btn)
-        splitter.addWidget(right)
-
-        splitter.setSizes([360, 560, 360])
-        self.setStatusBar(QStatusBar())
-
-        # menu
-        act_reload = QAction("重新加载本地树", self)
-        act_reload.triggered.connect(self.on_reload)
-        self.menuBar().addAction(act_reload)
+        self.status = tk.StringVar(value="ready")
+        ttk.Label(self, textvariable=self.status, anchor="w", font=self.font_status).grid(
+            row=1, column=0, sticky="ew", padx=8, pady=4
+        )
 
     # ----- helpers -----
     def _persist_cfg(self) -> None:
         self.cfg = {
-            "api_key": self.api_key.text().strip(),
-            "base_url": self.base_url.text().strip() or DEFAULT_BASE_URL,
-            "model": self.model.text().strip() or DEFAULT_MODEL,
-            "jd_text": self.jd_edit.toPlainText(),
+            "api_key": self.api_key.get().strip(),
+            "base_url": self.base_url.get().strip() or DEFAULT_BASE_URL,
+            "model": self.model.get().strip() or DEFAULT_MODEL,
+            "jd_text": self.jd_edit.get("1.0", "end-1c"),
         }
         save_config(self.cfg)
 
     def _set_busy(self, busy: bool) -> None:
-        for w in (
+        self._busy = busy
+        state = tk.DISABLED if busy else tk.NORMAL
+        for b in (
             self.btn_generate,
+            self.btn_offline,
             self.btn_expand,
             self.btn_sync,
-            self.btn_offline,
             self.btn_save,
             self.btn_export,
         ):
-            w.setEnabled(not busy)
+            b.configure(state=state)
 
-    def _run_worker(self, fn: Callable[[], Any], on_ok: Callable[[Any], None]) -> None:
-        if self._worker and self._worker.isRunning():
-            QMessageBox.information(self, "请稍候", "已有任务在进行中")
+    def _run_bg(self, fn: Callable[[], Any], on_ok: Callable[[Any], None]) -> None:
+        if self._busy:
+            messagebox.showinfo("请稍候", "已有任务在进行中")
             return
         self._set_busy(True)
         self._persist_cfg()
 
-        worker = Worker(fn)
-        self._worker = worker
-        worker.progress.connect(lambda m: self.statusBar().showMessage(m))
-        worker.finished_ok.connect(lambda result: self._on_worker_ok(result, on_ok))
-        worker.finished_err.connect(self._on_worker_err)
-        worker.start()
+        def worker() -> None:
+            try:
+                result = fn()
+            except Exception as e:  # noqa: BLE001
+                self.after(0, lambda: self._fail(str(e)))
+                return
+            self.after(0, lambda: self._ok(result, on_ok))
 
-    def _on_worker_ok(self, result: Any, on_ok: Callable[[Any], None]) -> None:
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _ok(self, result: Any, on_ok: Callable[[Any], None]) -> None:
         self._set_busy(False)
         try:
             on_ok(result)
         except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "处理失败", str(e))
+            messagebox.showerror("处理失败", str(e))
 
-    def _on_worker_err(self, msg: str) -> None:
+    def _fail(self, msg: str) -> None:
         self._set_busy(False)
-        QMessageBox.critical(self, "DeepSeek / 任务失败", msg)
-        self.statusBar().showMessage("失败")
+        self.status.set("失败")
+        messagebox.showerror("DeepSeek / 任务失败", msg)
 
     def _selected_node_id(self) -> str | None:
-        items = self.tree_widget.selectedItems()
-        if not items:
+        sel = self.tree.selection()
+        if not sel:
             return None
-        return items[0].data(0, Qt.ItemDataRole.UserRole)
+        return self._iid_to_id.get(sel[0])
 
-    def _reload_tree_widget(self, select_id: str | None = None) -> None:
-        self.tree_widget.clear()
-        self._item_by_id.clear()
+    def _reload_tree(self, select_id: str | None = None) -> None:
+        self.tree.delete(*self.tree.get_children())
+        self._iid_to_id.clear()
+        self._id_to_iid.clear()
         title = self.tree_data.get("title") or "面试题树"
-        self.setWindowTitle(f"FRAME 面试题树 · DeepSeek — {title}")
+        self.title(f"FRAME 面试题树 · DeepSeek — {title}")
 
-        def add_items(parent: QTreeWidgetItem | None, nodes: list[dict[str, Any]]) -> None:
+        def add(parent_iid: str, nodes: list[dict[str, Any]]) -> None:
             for n in nodes:
-                item = QTreeWidgetItem(
-                    [
-                        n.get("question") or "",
-                        ", ".join(n.get("tags") or []),
-                        str(len(n.get("children") or [])),
-                    ]
+                iid = self.tree.insert(
+                    parent_iid,
+                    "end",
+                    text=n.get("question") or "",
+                    values=(", ".join(n.get("tags") or []), len(n.get("children") or [])),
+                    open=parent_iid == "",
                 )
-                item.setData(0, Qt.ItemDataRole.UserRole, n["id"])
-                self._item_by_id[n["id"]] = item
-                if parent is None:
-                    self.tree_widget.addTopLevelItem(item)
-                else:
-                    parent.addChild(item)
-                add_items(item, n.get("children") or [])
+                self._iid_to_id[iid] = n["id"]
+                self._id_to_iid[n["id"]] = iid
+                add(iid, n.get("children") or [])
 
-        add_items(None, self.tree_data.get("nodes") or [])
-        self.tree_widget.expandToDepth(1)
-        if select_id and select_id in self._item_by_id:
-            item = self._item_by_id[select_id]
-            self.tree_widget.setCurrentItem(item)
-            item.setExpanded(True)
+        add("", self.tree_data.get("nodes") or [])
+        if select_id and select_id in self._id_to_iid:
+            iid = self._id_to_iid[select_id]
+            self.tree.selection_set(iid)
+            self.tree.see(iid)
+            self.on_select()
 
     def on_select(self) -> None:
         node_id = self._selected_node_id()
@@ -298,75 +328,70 @@ class MainWindow(QMainWindow):
         node, _, _ = find_node(self.tree_data.get("nodes") or [], node_id)
         if not node:
             return
-        self.q_edit.setPlainText(node.get("question") or "")
-        self.a_edit.setPlainText(node.get("answer") or "")
-        self.tags_edit.setText(", ".join(node.get("tags") or []))
+        self.q_edit.delete("1.0", tk.END)
+        self.q_edit.insert("1.0", node.get("question") or "")
+        self.a_edit.delete("1.0", tk.END)
+        self.a_edit.insert("1.0", node.get("answer") or "")
+        self.tags_edit.delete(0, tk.END)
+        self.tags_edit.insert(0, ", ".join(node.get("tags") or []))
 
-    def on_apply_node(self) -> None:
+    def on_apply(self) -> None:
         node_id = self._selected_node_id()
         if not node_id:
-            QMessageBox.information(self, "提示", "请先选中一个节点")
+            messagebox.showinfo("提示", "请先选中一个节点")
             return
         node, _, _ = find_node(self.tree_data.get("nodes") or [], node_id)
         if not node:
             return
-        node["question"] = self.q_edit.toPlainText().strip() or node["question"]
-        node["answer"] = self.a_edit.toPlainText().strip()
-        node["tags"] = [t.strip() for t in self.tags_edit.text().split(",") if t.strip()]
+        node["question"] = self.q_edit.get("1.0", "end-1c").strip() or node["question"]
+        node["answer"] = self.a_edit.get("1.0", "end-1c").strip()
+        node["tags"] = [t.strip() for t in self.tags_edit.get().split(",") if t.strip()]
         node["source"] = "manual"
         save_tree(self.tree_data)
-        self._reload_tree_widget(select_id=node_id)
-        self.statusBar().showMessage("已写回并保存")
+        self._reload_tree(select_id=node_id)
+        self.status.set("已写回并保存")
 
-    def on_delete_node(self) -> None:
+    def on_delete(self) -> None:
         node_id = self._selected_node_id()
         if not node_id:
             return
         node, parent, idx = find_node(self.tree_data.get("nodes") or [], node_id)
         if node is None or parent is None or idx < 0:
             return
-        if (
-            QMessageBox.question(self, "确认", "删除该节点及其全部子节点？")
-            != QMessageBox.StandardButton.Yes
-        ):
+        if not messagebox.askyesno("确认", "删除该节点及其全部子节点？"):
             return
         parent.pop(idx)
         save_tree(self.tree_data)
-        self._reload_tree_widget()
-        self.q_edit.clear()
-        self.a_edit.clear()
-        self.tags_edit.clear()
+        self._reload_tree()
+        self.q_edit.delete("1.0", tk.END)
+        self.a_edit.delete("1.0", tk.END)
+        self.tags_edit.delete(0, tk.END)
 
     def on_save(self) -> None:
         self._persist_cfg()
         save_tree(self.tree_data)
-        QMessageBox.information(self, "已保存", f"配置与题树已写入：\n{tree_path()}")
-
-    def on_reload(self) -> None:
-        self.tree_data = load_tree()
-        self._reload_tree_widget()
-        self.statusBar().showMessage("已从本地重新加载")
+        messagebox.showinfo("已保存", f"配置与题树已写入：\n{tree_path()}")
 
     def on_export(self) -> None:
-        from pathlib import Path
-
-        path, _ = QFileDialog.getSaveFileName(
-            self, "导出 Markdown", "interview_tree.md", "Markdown (*.md)"
+        path = filedialog.asksaveasfilename(
+            defaultextension=".md",
+            filetypes=[("Markdown", "*.md")],
+            initialfile="interview_tree.md",
         )
         if not path:
             return
         Path(path).write_text(export_markdown(self.tree_data), encoding="utf-8")
-        QMessageBox.information(self, "导出完成", path)
+        messagebox.showinfo("导出完成", path)
 
     def on_offline_seed(self) -> None:
-        jd = self.jd_edit.toPlainText().strip() or DEFAULT_JD
+        jd = self.jd_edit.get("1.0", "end-1c").strip() or DEFAULT_JD
         self.tree_data = seed_offline_tree(jd)
         save_tree(self.tree_data)
         self._persist_cfg()
-        self._reload_tree_widget()
-        self.statusBar().showMessage("已生成离线种子树（可再联网同步升级）")
+        self._reload_tree()
+        self.status.set("已生成离线种子树（可再联网同步升级）")
 
-    def on_test_connection(self) -> None:
+    def on_test(self) -> None:
         self._persist_cfg()
 
         def job() -> str:
@@ -375,17 +400,19 @@ class MainWindow(QMainWindow):
             )
 
         def ok(text: str) -> None:
-            QMessageBox.information(self, "连接成功", text[:300] or "OK")
+            messagebox.showinfo("连接成功", (text or "OK")[:300])
+            self.status.set("DeepSeek 连接正常")
 
-        self._run_worker(job, ok)
+        self._run_bg(job, ok)
 
     def on_generate(self) -> None:
-        jd = self.jd_edit.toPlainText().strip()
+        jd = self.jd_edit.get("1.0", "end-1c").strip()
         if not jd:
-            QMessageBox.warning(self, "缺少 JD", "请先在左侧输入职位描述")
+            messagebox.showwarning("缺少 JD", "请先在左侧输入职位描述")
             return
-        extra = self.extra_edit.toPlainText().strip()
+        extra = self.extra_edit.get("1.0", "end-1c").strip()
         self._persist_cfg()
+        self.status.set("正在请求 DeepSeek 生成题树…")
 
         def job() -> dict[str, Any]:
             content = chat(
@@ -393,44 +420,34 @@ class MainWindow(QMainWindow):
                 base_url=self.cfg["base_url"],
                 model=self.cfg["model"],
                 messages=build_generate_messages(jd, extra),
-                progress=lambda m: self._worker.progress.emit(m) if self._worker else None,
             )
-            parsed = parse_generate_payload(content)
-            return {
-                "title": parsed["title"],
-                "nodes": parsed["nodes"],
-            }
+            return parse_generate_payload(content)
 
         def ok(data: dict[str, Any]) -> None:
-            from tree_store import normalize_tree
-
             self.tree_data = normalize_tree(
-                {
-                    "version": 1,
-                    "title": data["title"],
-                    "nodes": data["nodes"],
-                }
+                {"version": 1, "title": data["title"], "nodes": data["nodes"]}
             )
             save_tree(self.tree_data)
-            self._reload_tree_widget()
-            self.statusBar().showMessage(
+            self._reload_tree()
+            self.status.set(
                 f"已生成 {len(self.tree_data.get('nodes') or [])} 个一级题目并保存"
             )
 
-        self._run_worker(job, ok)
+        self._run_bg(job, ok)
 
     def on_expand(self) -> None:
         node_id = self._selected_node_id()
         if not node_id:
-            QMessageBox.information(self, "提示", "请先选中要生长的节点")
+            messagebox.showinfo("提示", "请先选中要生长的节点")
             return
         node, _, _ = find_node(self.tree_data.get("nodes") or [], node_id)
         if not node:
             return
         path = path_to_node(self.tree_data.get("nodes") or [], node_id) or []
-        jd = self.jd_edit.toPlainText().strip() or DEFAULT_JD
-        count = self.expand_count.value()
+        jd = self.jd_edit.get("1.0", "end-1c").strip() or DEFAULT_JD
+        count = int(self.expand_count.get())
         self._persist_cfg()
+        self.status.set("正在展开子题…")
 
         def job() -> list[dict[str, Any]]:
             content = chat(
@@ -440,29 +457,29 @@ class MainWindow(QMainWindow):
                 messages=build_expand_messages(
                     jd, path, node["question"], node.get("answer") or "", count
                 ),
-                progress=lambda m: self._worker.progress.emit(m) if self._worker else None,
             )
             return parse_expand_payload(content)
 
         def ok(children: list[dict[str, Any]]) -> None:
             attach_children(node, children)
             save_tree(self.tree_data)
-            self._reload_tree_widget(select_id=node_id)
-            self.statusBar().showMessage(f"已生长 {len(children)} 个子题")
+            self._reload_tree(select_id=node_id)
+            self.status.set(f"已生长 {len(children)} 个子题")
 
-        self._run_worker(job, ok)
+        self._run_bg(job, ok)
 
     def on_sync(self) -> None:
         node_id = self._selected_node_id()
         if not node_id:
-            QMessageBox.information(self, "提示", "请先选中要同步的节点")
+            messagebox.showinfo("提示", "请先选中要同步的节点")
             return
         node, _, _ = find_node(self.tree_data.get("nodes") or [], node_id)
         if not node:
             return
         path = path_to_node(self.tree_data.get("nodes") or [], node_id) or []
-        jd = self.jd_edit.toPlainText().strip() or DEFAULT_JD
+        jd = self.jd_edit.get("1.0", "end-1c").strip() or DEFAULT_JD
         self._persist_cfg()
+        self.status.set("正在与 DeepSeek 同步…")
 
         def job() -> dict[str, Any]:
             content = chat(
@@ -472,30 +489,23 @@ class MainWindow(QMainWindow):
                 messages=build_sync_messages(
                     jd, path, node["question"], node.get("answer") or ""
                 ),
-                progress=lambda m: self._worker.progress.emit(m) if self._worker else None,
             )
             return parse_sync_payload(content)
 
         def ok(patch: dict[str, Any]) -> None:
             replace_node_content(node, patch)
             save_tree(self.tree_data)
-            self._reload_tree_widget(select_id=node_id)
-            self.on_select()
-            self.statusBar().showMessage("已与 DeepSeek 同步并保存到本地")
+            self._reload_tree(select_id=node_id)
+            self.status.set("已与 DeepSeek 同步并保存到本地")
 
-        self._run_worker(job, ok)
+        self._run_bg(job, ok)
 
 
 def main() -> int:
-    app = QApplication(sys.argv)
-    font = QFont("Microsoft YaHei UI", 10)
-    app.setFont(font)
-    win = MainWindow()
-    win.show()
-    # Auto-seed empty tree for first launch
-    if not (win.tree_data.get("nodes") or []):
-        win.on_offline_seed()
-    return app.exec()
+    enable_windows_dpi_awareness()
+    app = App()
+    app.mainloop()
+    return 0
 
 
 if __name__ == "__main__":

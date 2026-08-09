@@ -27,6 +27,12 @@ npm run dev:web    # http://localhost:3088 → /zh 或 /en
 
 演示账号：`admin@frame.demo` / `admin123`（另有 editor / viewer，密码为角色名+123）。
 
+也可双击根目录启动脚本（推荐英文文件名，避免 cmd 编码问题）：
+
+- `start-interview-tree.bat` — 启动 DeepSeek 面试题树桌面端（优先 EXE）
+- `start-web-demo.bat` — 一键开 API + Web
+- `启动面试题树.bat` / `启动Web演示.bat` — 同上（中文名包装）
+
 ### 多语言
 
 - 路由前缀：`/zh/*`、`/en/*`

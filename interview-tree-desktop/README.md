@@ -2,6 +2,8 @@
 
 针对目标岗位 JD，用 DeepSeek 生成可不断展开生长的面试题与答案树；全部保存在本地，可联网同步更新。
 
+界面使用 **tkinter（Python 自带）**，不依赖 PySide6/Qt，避免 Windows 上常见的 `DLL load failed while importing QtCore`。
+
 ## 功能
 
 1. **输入框**：粘贴/编辑职位描述；填写 DeepSeek API Key / Base URL / Model  
@@ -19,6 +21,12 @@ cd interview-tree-desktop
 pip install -r requirements.txt
 python app.py
 ```
+
+或双击（推荐）：
+
+- 仓库根目录 `start-interview-tree.bat`（优先 EXE，否则 Python）
+- 本目录 `start.bat`（开发模式）
+- 中文名：`启动面试题树.bat`（内部转调上面的英文脚本）
 
 ## 打包 EXE
 
