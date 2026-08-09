@@ -159,6 +159,9 @@ class DetailPopup(tk.Toplevel):
         title: str,
         text: str,
         font: tkfont.Font,
+        *,
+        on_ai_query: Callable[[str], None] | None = None,
+        on_ai_metaphor: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(master)
         self.title(title or "查看")
@@ -167,6 +170,7 @@ class DetailPopup(tk.Toplevel):
         x, y = (sw - w) // 2, (sh - h) // 2
         self.geometry(f"{w}x{h}+{x}+{y}")
         self.minsize(640, 420)
+        self._text = text or ""
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -177,11 +181,26 @@ class DetailPopup(tk.Toplevel):
         ttk.Label(head, text=title or "", style="Title.TLabel").grid(
             row=0, column=0, sticky="w"
         )
-        ttk.Button(head, text="复制", command=lambda: self._copy(text)).grid(
-            row=0, column=1, sticky="e"
+        col = 1
+        if on_ai_query is not None:
+            ttk.Button(
+                head,
+                text="AI 查询",
+                command=lambda: on_ai_query(self._text),
+            ).grid(row=0, column=col, sticky="e", padx=4)
+            col += 1
+        if on_ai_metaphor is not None:
+            ttk.Button(
+                head,
+                text="AI 比喻",
+                command=lambda: on_ai_metaphor(self._text),
+            ).grid(row=0, column=col, sticky="e", padx=4)
+            col += 1
+        ttk.Button(head, text="复制", command=lambda: self._copy(self._text)).grid(
+            row=0, column=col, sticky="e"
         )
         ttk.Button(head, text="关闭", command=self.destroy).grid(
-            row=0, column=2, sticky="e", padx=(8, 0)
+            row=0, column=col + 1, sticky="e", padx=(8, 0)
         )
 
         box = ttk.Frame(self)
@@ -194,7 +213,7 @@ class DetailPopup(tk.Toplevel):
         sb.grid(row=0, column=1, sticky="ns")
         txt.configure(yscrollcommand=sb.set)
         txt.configure(state=tk.NORMAL)
-        txt.insert("1.0", text or "")
+        txt.insert("1.0", self._text)
         txt.configure(state=tk.DISABLED)
         self.txt = txt
 
@@ -1009,8 +1028,12 @@ class App(tk.Tk):
         self._button(
             ans_header,
             "弹窗",
-            lambda: self._open_detail("参考答案", self.a_edit.get("1.0", "end-1c")),
-            "在新窗口（80% 屏幕）查看答案完整内容；双击输入框也可打开。",
+            lambda: self._open_detail(
+                "参考答案",
+                self.a_edit.get("1.0", "end-1c"),
+                answer_tools=True,
+            ),
+            "在新窗口（80% 屏幕）查看答案完整内容；双击词可划词查询。",
         ).grid(row=0, column=1, sticky="e", padx=4)
         self._button(
             ans_header,
@@ -1044,7 +1067,22 @@ class App(tk.Tk):
         self.a_edit.configure(yscrollcommand=ans_scroll.set)
         self._setup_answer_lookup(self.a_edit)
 
-        ttk.Label(right, text="标签（逗号分隔）").grid(row=5, column=0, sticky="w", pady=(6, 2))
+        tags_header = ttk.Frame(right)
+        tags_header.grid(row=5, column=0, sticky="ew", pady=(6, 2))
+        tags_header.columnconfigure(0, weight=1)
+        ttk.Label(tags_header, text="标签（逗号分隔）").grid(row=0, column=0, sticky="w")
+        self._button(
+            tags_header,
+            "AI 查询",
+            lambda: self.on_ai_explain_answer(),
+            "用 DeepSeek 解释当前参考答案：要点、为什么这样答、常见踩坑。",
+        ).grid(row=0, column=1, sticky="e", padx=4)
+        self._button(
+            tags_header,
+            "AI 比喻",
+            lambda: self.on_ai_metaphor_answer(),
+            "用通俗比喻讲解当前参考答案，帮助记忆与口述。",
+        ).grid(row=0, column=2, sticky="e")
         self.tags_edit = tk.Entry(right, font=self.font_input)
         self.tags_edit.grid(row=6, column=0, sticky="ew", ipady=4)
 
@@ -1292,8 +1330,19 @@ class App(tk.Tk):
         self.stats_var.set(f"共 {s['total']} 题 · 一级 {s['roots']} · 标签 {s['tags']}")
 
     # ----- 弹窗 / 朗读 / 重点 -----
-    def _open_detail(self, title: str, text: str, font: tkfont.Font | None = None) -> None:
-        DetailPopup(self, title, text, font or self.font_body)
+    def _open_detail(
+        self,
+        title: str,
+        text: str,
+        font: tkfont.Font | None = None,
+        *,
+        answer_tools: bool = False,
+    ) -> None:
+        kwargs: dict[str, Any] = {}
+        if answer_tools:
+            kwargs["on_ai_query"] = self.on_ai_explain_answer
+            kwargs["on_ai_metaphor"] = self.on_ai_metaphor_answer
+        DetailPopup(self, title, text, font or self.font_body, **kwargs)
 
     def _bind_double_open(self, widget: tk.Misc, title: str) -> None:
         def _h(_event: object) -> str:
@@ -1313,7 +1362,79 @@ class App(tk.Tk):
             messagebox.showinfo("查看重点", "未能提取出重点（答案过短）")
             return
         rendered = "\n".join(f"• {p}" for p in points)
-        self._open_detail("参考答案 · 重点", rendered, self.font_body)
+        self._open_detail("参考答案 · 重点", rendered, self.font_body, answer_tools=True)
+
+    def on_ai_explain_answer(self, answer: str | None = None) -> None:
+        self._ai_answer_assist(
+            mode="explain",
+            answer=answer,
+            status="正在用 AI 解释答案…",
+            title_prefix="AI 查询 · 答案解释",
+        )
+
+    def on_ai_metaphor_answer(self, answer: str | None = None) -> None:
+        self._ai_answer_assist(
+            mode="metaphor",
+            answer=answer,
+            status="正在用 AI 生成比喻…",
+            title_prefix="AI 比喻 · 通俗讲解",
+        )
+
+    def _ai_answer_assist(
+        self,
+        *,
+        mode: str,
+        answer: str | None,
+        status: str,
+        title_prefix: str,
+    ) -> None:
+        ans = (answer if answer is not None else self.a_edit.get("1.0", "end-1c")).strip()
+        if not ans:
+            messagebox.showinfo("提示", "当前没有可解释的参考答案")
+            return
+        question = self.q_edit.get("1.0", "end-1c").strip()
+        self._persist_cfg()
+        self.status.set(status)
+
+        if mode == "metaphor":
+            system = (
+                "你是面试教练。用 1~2 个生动比喻解释候选人答案，"
+                "每个比喻后用 2~3 句对应回技术要点；口语化、便于背诵；中文作答。"
+            )
+            user = (
+                f"面试问题：\n{question or '（未提供）'}\n\n"
+                f"参考答案：\n{ans}\n\n"
+                "请输出：比喻讲解 + 对应技术要点 + 一句口述开场白。"
+            )
+        else:
+            system = (
+                "你是资深面试官教练。解释这段参考答案：关键点、为什么这样答、"
+                "追问风险与更好的口述结构；条理清晰；中文作答。"
+            )
+            user = (
+                f"面试问题：\n{question or '（未提供）'}\n\n"
+                f"参考答案：\n{ans}\n\n"
+                "请输出：① 核心结论 ② 要点拆解 ③ 常见踩坑 ④ 30 秒口述版。"
+            )
+
+        def job() -> str:
+            return chat(
+                api_key=self.cfg["api_key"],
+                base_url=self.cfg["base_url"],
+                model=self.cfg["model"],
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                timeout=90,
+                max_tokens=1600,
+            )
+
+        def ok(text: str) -> None:
+            self._open_detail(title_prefix, text or "（空响应）", answer_tools=True)
+            self.status.set(f"{title_prefix} 完成")
+
+        self._run_bg(job, ok)
 
     def on_speak(self) -> None:
         text = self.a_edit.get("1.0", "end-1c").strip()
@@ -1382,7 +1503,7 @@ class App(tk.Tk):
             menu.add_command(
                 label="弹窗打开全文",
                 command=lambda: self._open_detail(
-                    "参考答案", widget.get("1.0", "end-1c")
+                    "参考答案", widget.get("1.0", "end-1c"), answer_tools=True
                 ),
             )
             try:
