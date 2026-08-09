@@ -27,11 +27,13 @@ from coding_lab import (
     run_with_tests,
 )
 from prompts import (
+    build_code_complete_messages,
     build_coding_messages,
     build_expand_messages,
     build_generate_messages,
     build_refresh_messages,
     build_sync_messages,
+    parse_code_complete_payload,
     parse_coding_payload,
     parse_expand_payload,
     parse_generate_payload,
@@ -602,7 +604,7 @@ class QuizWindow(tk.Toplevel):
 
 
 class CodingLabWindow(tk.Toplevel):
-    """实操实验室：多语言编辑、运行、自测、看参考实现。"""
+    """实操实验室：多语言编辑、DeepSeek 补全、运行、自测、看参考实现。"""
 
     def __init__(
         self,
@@ -625,6 +627,13 @@ class CodingLabWindow(tk.Toplevel):
         self.columnconfigure(1, weight=1)
         self.rowconfigure(1, weight=1)
 
+        self._complete_busy = False
+        self._complete_gen = 0
+        self._idle_after: str | None = None
+        self._ghost_text = ""
+        self._ghost_index: str | None = None
+        self._auto_complete = tk.BooleanVar(value=True)
+
         head = ttk.Frame(self)
         head.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(10, 4))
         head.columnconfigure(0, weight=1)
@@ -637,24 +646,26 @@ class CodingLabWindow(tk.Toplevel):
         lang_row = ttk.Frame(head)
         lang_row.grid(row=0, column=1, sticky="e", padx=(8, 8))
         ttk.Label(lang_row, text="语言").pack(side=tk.LEFT)
-        self._lang_ids = [lid for _, lid in LANG_OPTIONS]
         self._lang_labels = [label for label, _ in LANG_OPTIONS]
         initial = normalize_lang(node.get("language") or "python")
-        self.lang_var = tk.StringVar(
-            value=LANG_LABELS.get(initial, "Python")
-        )
+        self.lang_var = tk.StringVar(value=LANG_LABELS.get(initial, "Python"))
         self.lang_combo = ttk.Combobox(
             lang_row,
             textvariable=self.lang_var,
             values=self._lang_labels,
             state="readonly",
-            width=18,
+            width=20,
             font=font_ui,
         )
         self.lang_combo.pack(side=tk.LEFT, padx=6)
         self.lang_combo.bind("<<ComboboxSelected>>", self.on_lang_change)
         self.runtime_var = tk.StringVar(value="")
-        ttk.Label(lang_row, textvariable=self.runtime_var).pack(side=tk.LEFT, padx=4)
+        ttk.Label(lang_row, textvariable=self.runtime_var, width=36).pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Checkbutton(
+            lang_row, text="自动补全", variable=self._auto_complete
+        ).pack(side=tk.LEFT, padx=4)
         ttk.Button(head, text="关闭", command=self.destroy).grid(row=0, column=2, sticky="e")
 
         left = ttk.Frame(self, padding=8)
@@ -694,10 +705,18 @@ class CodingLabWindow(tk.Toplevel):
         code_scroll = ttk.Scrollbar(right, orient=tk.VERTICAL, command=self.code.yview)
         code_scroll.grid(row=1, column=1, sticky="ns")
         self.code.configure(yscrollcommand=code_scroll.set)
+        self.code.tag_configure("ghost", foreground="#8a8a8a")
+        self.code.bind("<KeyRelease>", self._on_code_key)
+        self.code.bind("<Button-1>", self._on_code_click)
+        self.code.bind("<Control-space>", self._on_force_complete)
+        self.code.bind("<Control-Key-space>", self._on_force_complete)
+        self.code.bind("<Tab>", self._on_tab)
+        self.code.bind("<Escape>", self._on_escape)
+        self.code.bind("<<Paste>>", lambda _e: self.after(1, self._clear_ghost))
 
         btns = ttk.Frame(right)
         btns.grid(row=2, column=0, columnspan=2, sticky="ew", pady=6)
-        for i in range(4):
+        for i in range(5):
             btns.columnconfigure(i, weight=1)
         ttk.Button(btns, text="运行代码", command=self.on_run).grid(
             row=0, column=0, sticky="ew", padx=2
@@ -705,14 +724,21 @@ class CodingLabWindow(tk.Toplevel):
         ttk.Button(btns, text="跑自测", command=self.on_test).grid(
             row=0, column=1, sticky="ew", padx=2
         )
-        ttk.Button(btns, text="重置模板", command=self.on_reset).grid(
+        ttk.Button(btns, text="DeepSeek 补全", command=self.on_ai_complete).grid(
             row=0, column=2, sticky="ew", padx=2
         )
-        ttk.Button(btns, text="查看参考实现", command=self.on_solution).grid(
+        ttk.Button(btns, text="重置模板", command=self.on_reset).grid(
             row=0, column=3, sticky="ew", padx=2
         )
+        ttk.Button(btns, text="查看参考实现", command=self.on_solution).grid(
+            row=0, column=4, sticky="ew", padx=2
+        )
 
-        ttk.Label(right, text="输出", font=font_ui).grid(row=3, column=0, sticky="w")
+        ttk.Label(
+            right,
+            text="输出（Tab 接受灰字补全 · Esc 取消 · Ctrl+Space 立即补全）",
+            font=font_ui,
+        ).grid(row=3, column=0, sticky="w")
         self.out = tk.Text(right, wrap=tk.WORD, font=font_code, height=10)
         self.out.grid(row=4, column=0, columnspan=2, sticky="nsew")
 
@@ -730,9 +756,13 @@ class CodingLabWindow(tk.Toplevel):
         lang = self._current_lang()
         self.code_label.configure(text=f"你的代码（{LANG_LABELS.get(lang, lang)}）")
         ok, info = runtime_status(lang)
-        self.runtime_var.set(("✓ " if ok else "✗ ") + str(info))
+        short = str(info)
+        if len(short) > 48:
+            short = short[:45] + "…"
+        self.runtime_var.set(("✓ " if ok else "✗ ") + short)
 
     def on_lang_change(self, _event: object | None = None) -> None:
+        self._clear_ghost()
         lang = self._current_lang()
         self._refresh_lang_ui()
         cur = self.code.get("1.0", "end-1c").strip()
@@ -743,7 +773,7 @@ class CodingLabWindow(tk.Toplevel):
             if lang == self._original_lang and node_starter:
                 self.code.insert("1.0", node_starter)
             else:
-                self.code.insert("1.0", STARTERS.get(lang, ""))
+                self.code.insert("1.0", STARTERS.get(lang, f"// {lang}\n"))
         self.status_note(f"已切换语言：{LANG_LABELS.get(lang, lang)}")
 
     def status_note(self, text: str) -> None:
@@ -756,7 +786,187 @@ class CodingLabWindow(tk.Toplevel):
         self.out.delete("1.0", tk.END)
         self.out.insert("1.0", text)
 
+    def _cancel_idle(self) -> None:
+        if self._idle_after is not None:
+            try:
+                self.after_cancel(self._idle_after)
+            except tk.TclError:
+                pass
+            self._idle_after = None
+
+    def _clear_ghost(self) -> None:
+        if self._ghost_index and self._ghost_text:
+            end = self.code.index(f"{self._ghost_index}+{len(self._ghost_text)}c")
+            self.code.delete(self._ghost_index, end)
+        self._ghost_text = ""
+        self._ghost_index = None
+
+    def _on_code_click(self, _event: object | None = None) -> None:
+        self._clear_ghost()
+
+    def _on_code_key(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        # 导航/修饰键不触发；接受补全的键另处理
+        if event.keysym in (
+            "Shift_L",
+            "Shift_R",
+            "Control_L",
+            "Control_R",
+            "Alt_L",
+            "Alt_R",
+            "Tab",
+            "Escape",
+            "Up",
+            "Down",
+            "Left",
+            "Right",
+            "Home",
+            "End",
+            "Prior",
+            "Next",
+        ):
+            return
+        # 用户开始输入时清掉旧 ghost（KeyRelease 时 ghost 可能已在光标后）
+        if self._ghost_text and event.keysym not in ("Tab",):
+            # 若刚插入的字符落在 ghost 前，ghost 索引会偏移；直接清掉更稳
+            self._clear_ghost()
+        if not self._auto_complete.get():
+            return
+        if self._complete_busy:
+            return
+        self._cancel_idle()
+        self._idle_after = self.after(1100, lambda: self._request_complete(force=False))
+
+    def _on_force_complete(self, _event: object | None = None):
+        self._request_complete(force=True)
+        return "break"
+
+    def _on_tab(self, _event: object | None = None):
+        if self._ghost_text and self._ghost_index:
+            # ghost 已是灰字显示在文档里：去掉 ghost 标签即可变成正式文本
+            end = self.code.index(f"{self._ghost_index}+{len(self._ghost_text)}c")
+            self.code.tag_remove("ghost", self._ghost_index, end)
+            self.code.mark_set(tk.INSERT, end)
+            self._ghost_text = ""
+            self._ghost_index = None
+            return "break"
+        return None
+
+    def _on_escape(self, _event: object | None = None):
+        if self._ghost_text:
+            self._clear_ghost()
+            return "break"
+        return None
+
+    def _cursor_parts(self) -> tuple[str, str, str]:
+        """返回 (prefix, suffix, insert_index)。若有 ghost，prefix/suffix 按真实代码算。"""
+        insert = self.code.index(tk.INSERT)
+        if self._ghost_index and self._ghost_text:
+            # 光标通常在 ghost 前
+            ghost_end = self.code.index(f"{self._ghost_index}+{len(self._ghost_text)}c")
+            prefix = self.code.get("1.0", self._ghost_index)
+            suffix = self.code.get(ghost_end, "end-1c")
+            return prefix, suffix, self._ghost_index
+        prefix = self.code.get("1.0", insert)
+        suffix = self.code.get(insert, "end-1c")
+        return prefix, suffix, insert
+
+    def on_ai_complete(self) -> None:
+        self._request_complete(force=True)
+
+    def _request_complete(self, *, force: bool) -> None:
+        self._cancel_idle()
+        if self._complete_busy:
+            if force:
+                self.status_note("补全请求进行中…")
+            return
+
+        try:
+            self.master_app._persist_cfg()
+        except Exception:
+            pass
+        cfg = getattr(self.master_app, "cfg", None) or {}
+        api_key = (cfg.get("api_key") or "").strip()
+        if not api_key:
+            if force:
+                messagebox.showwarning(
+                    "DeepSeek 补全", "请先在主窗口填写 DeepSeek API Key", parent=self
+                )
+            return
+
+        prefix, suffix, insert = self._cursor_parts()
+        if not force and not prefix.rstrip():
+            return
+
+        self._clear_ghost()
+        lang = self._current_lang()
+        self._complete_busy = True
+        self._complete_gen += 1
+        gen = self._complete_gen
+        self.status_note("DeepSeek 代码补全中…")
+
+        messages = build_code_complete_messages(
+            language=lang,
+            prefix=prefix,
+            suffix=suffix,
+            question=str(self.node.get("question") or ""),
+            answer=str(self.node.get("answer") or ""),
+            hint=str(self.node.get("hint") or ""),
+        )
+        base_url = cfg.get("base_url") or ""
+        model = cfg.get("model") or ""
+
+        def worker() -> None:
+            try:
+                raw = chat(
+                    api_key=api_key,
+                    messages=messages,
+                    base_url=base_url,
+                    model=model,
+                    temperature=0.2,
+                    timeout=60,
+                    json_mode=True,
+                    max_tokens=512,
+                )
+                text = parse_code_complete_payload(raw)
+            except Exception as e:  # noqa: BLE001
+                err = str(e)
+                self.after(0, lambda: self._complete_fail(gen, err, force=force))
+                return
+            self.after(0, lambda: self._complete_ok(gen, text, insert))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _complete_fail(self, gen: int, err: str, *, force: bool) -> None:
+        if gen != self._complete_gen:
+            return
+        self._complete_busy = False
+        self.status_note("补全失败")
+        if force:
+            messagebox.showerror("DeepSeek 补全失败", err, parent=self)
+
+    def _complete_ok(self, gen: int, completion: str, insert_at: str) -> None:
+        if gen != self._complete_gen:
+            return
+        self._complete_busy = False
+        text = (completion or "").replace("\r\n", "\n").replace("\r", "\n")
+        if not text:
+            self.status_note("无需补全")
+            return
+        # 若用户已移动光标，尽量仍插在原位置；若文档变了则插当前光标
+        try:
+            pos = insert_at
+            self.code.index(pos)
+        except tk.TclError:
+            pos = self.code.index(tk.INSERT)
+        self._clear_ghost()
+        self.code.insert(pos, text, ("ghost",))
+        self._ghost_index = pos
+        self._ghost_text = text
+        self.code.mark_set(tk.INSERT, pos)
+        self.status_note("已给出补全建议（Tab 接受 / Esc 取消）")
+
     def on_run(self) -> None:
+        self._clear_ghost()
         lang = self._current_lang()
         ok, info = runtime_status(lang)
         if not ok:
@@ -775,6 +985,7 @@ class CodingLabWindow(tk.Toplevel):
         self._set_out("\n".join(parts))
 
     def on_test(self) -> None:
+        self._clear_ghost()
         lang = self._current_lang()
         node_lang = self._original_lang
         tests = self.node.get("tests") or []
@@ -806,14 +1017,16 @@ class CodingLabWindow(tk.Toplevel):
             messagebox.showinfo("自测通过", f"全部 {r['total']} 条用例通过！", parent=self)
 
     def on_reset(self) -> None:
+        self._clear_ghost()
         lang = self._current_lang()
         self.code.delete("1.0", tk.END)
         if lang == self._original_lang and self.node.get("starter_code"):
             self.code.insert("1.0", self.node.get("starter_code") or "")
         else:
-            self.code.insert("1.0", STARTERS.get(lang, ""))
+            self.code.insert("1.0", STARTERS.get(lang, f"// {lang}\n"))
 
     def on_solution(self) -> None:
+        self._clear_ghost()
         lang = self._current_lang()
         if lang != self._original_lang:
             messagebox.showinfo(

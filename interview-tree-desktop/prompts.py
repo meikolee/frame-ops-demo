@@ -254,14 +254,15 @@ def build_coding_messages(jd: str, extra: str = "", count: int = 3) -> list[dict
     jd_short = (jd or "").strip()
     if len(jd_short) > 1600:
         jd_short = jd_short[:1600] + "\n…(JD 已截断)"
-    user = f"""请根据职位描述生成 {count} 道「可本地手写」的面试实操编程题（Python）。
+    user = f"""请根据职位描述生成 {count} 道「可本地手写」的面试实操编程题。
 
 硬性要求：
-1. 每题必须能在单文件 Python 里完成，15~30 分钟难度
+1. 每题单文件可完成，15~30 分钟难度；language 字段写真实语言 id（如 python/javascript/typescript/go/java/sql/bash 等）
 2. 紧扣 JD（Nest/Next/SQL/RBAC/上传/流媒体/Linux 运维相关算法或小函数均可）
 3. starter_code 给出函数签名与 TODO；solution_code 给出完整可运行参考实现
-4. tests 为 3~5 条可直接 exec 的断言或短代码（字符串），不要依赖第三方库
-5. 只输出 JSON 对象
+4. tests 为 3~5 条可直接执行的断言或短代码（字符串），不要依赖第三方库；须与 language 匹配
+5. 多题尽量覆盖不同语言（至少包含 Python，另可含 JS/TS/SQL/Bash/Go/Java 等）
+6. 只输出 JSON 对象
 
 输出：
 {{
@@ -285,12 +286,82 @@ def build_coding_messages(jd: str, extra: str = "", count: int = 3) -> list[dict
 {jd_short}
 
 补充要求：
-{extra or "覆盖鉴权、数据结构、字符串/数组、并发安全中的至少一类"}
+{extra or "覆盖鉴权、数据结构、字符串/数组、并发安全中的至少一类；语言尽量多样"}
 """
     return [
         {"role": "system", "content": SYSTEM_JSON},
         {"role": "user", "content": user},
     ]
+
+
+def build_code_complete_messages(
+    *,
+    language: str,
+    prefix: str,
+    suffix: str,
+    question: str = "",
+    answer: str = "",
+    hint: str = "",
+) -> list[dict[str, str]]:
+    """光标处代码补全：只返回应插入在光标处的 continuation。"""
+    lang = (language or "python").strip() or "python"
+    # 控制上下文体积
+    pref = prefix[-4000:] if len(prefix) > 4000 else prefix
+    suf = suffix[:1500] if len(suffix) > 1500 else suffix
+    meta = "\n".join(
+        x
+        for x in (
+            f"题目：{question.strip()}" if question.strip() else "",
+            f"考点：{answer.strip()[:800]}" if answer.strip() else "",
+            f"提示：{hint.strip()}" if hint.strip() else "",
+        )
+        if x
+    )
+    user = f"""你是代码补全引擎。根据光标前/后上下文，生成应插入在光标处的代码续写。
+
+规则：
+1. 语言：{lang}
+2. 只输出 JSON：{{"completion":"..."}}
+3. completion 仅为光标处要插入的文本（不要重复 prefix，不要解释，不要 markdown）
+4. 尽量短而可运行；优先补完当前语句/函数；不要整文件重写
+5. 若已写完则返回空字符串 completion
+
+{meta or "（无额外题目上下文）"}
+
+<<<PREFIX
+{pref}
+PREFIX>>>
+<<<SUFFIX
+{suf}
+SUFFIX>>>
+"""
+    return [
+        {"role": "system", "content": SYSTEM_JSON},
+        {"role": "user", "content": user},
+    ]
+
+
+def parse_code_complete_payload(text: str) -> str:
+    data = _extract_json(text)
+    if isinstance(data, dict):
+        for key in ("completion", "code", "text", "insert"):
+            if key in data and data[key] is not None:
+                return str(data[key])
+        # 偶发直接给 content
+        if "content" in data and isinstance(data["content"], str):
+            return data["content"]
+    if isinstance(data, str):
+        return data
+    # 非 JSON 时，尝试去掉代码围栏
+    raw = (text or "").strip()
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        return "\n".join(lines)
+    return raw
 
 
 def parse_coding_payload(text: str) -> list[dict[str, Any]]:
