@@ -16,11 +16,20 @@ import {
   listCrawlJobs,
   login,
 } from "@/lib/api";
-import styles from "./ops.module.css";
+import type { Locale } from "@/i18n/config";
+import type { Dictionary } from "@/i18n/get-dictionary";
+import styles from "./OpsConsole.module.css";
 
 type AuthState = { token: string; user: SessionUser };
 
-export default function OpsPage() {
+export function OpsConsole({
+  locale,
+  dict,
+}: {
+  locale: Locale;
+  dict: Dictionary;
+}) {
+  const t = dict.ops;
   const [auth, setAuth] = useState<AuthState | null>(null);
   const [email, setEmail] = useState("admin@frame.demo");
   const [password, setPassword] = useState("admin123");
@@ -78,24 +87,24 @@ export default function OpsPage() {
   }
 
   return (
-    <main className={styles.shell}>
-      <header className={styles.top}>
-        <Link href="/" className={styles.brand}>
-          FRAME
+    <>
+      <p className={styles.tagLine}>
+        {t.tag} ·{" "}
+        <Link href={`/${locale}/guide`} className={styles.guideLink}>
+          {t.guideLink}
         </Link>
-        <span className={styles.tag}>CSR ops console · client components</span>
-      </header>
+      </p>
 
       {!auth ? (
         <form className={styles.login} onSubmit={onLogin}>
-          <h1>Sign in</h1>
-          <p>Demo accounts: admin / editor / viewer @frame.demo — passwords `*123`.</p>
+          <h1>{t.signIn}</h1>
+          <p>{t.accounts}</p>
           <label>
-            Email
+            {t.email}
             <input value={email} onChange={(e) => setEmail(e.target.value)} />
           </label>
           <label>
-            Password
+            {t.password}
             <input
               type="password"
               value={password}
@@ -104,13 +113,13 @@ export default function OpsPage() {
           </label>
           {error ? <p className={styles.error}>{error}</p> : null}
           <button type="submit" disabled={busy}>
-            {busy ? "Signing in…" : "Enter control room"}
+            {busy ? t.signingIn : t.enter}
           </button>
         </form>
       ) : (
         <div className={styles.grid}>
           <section className={styles.panel}>
-            <h2>Session</h2>
+            <h2>{t.session}</h2>
             <p className={styles.mono}>
               {auth.user.name} · {auth.user.role}
             </p>
@@ -122,7 +131,7 @@ export default function OpsPage() {
           </section>
 
           <section className={styles.panel}>
-            <h2>Analytics (7d)</h2>
+            <h2>{t.analytics}</h2>
             {summary ? (
               <dl className={styles.metrics}>
                 <div>
@@ -143,21 +152,19 @@ export default function OpsPage() {
                 </div>
               </dl>
             ) : (
-              <p className={styles.mono}>No data</p>
+              <p className={styles.mono}>{t.noData}</p>
             )}
-            <p className={styles.hint}>
-              PV = page_view rows · UV = distinct visitor_id · D1 = cohort return rate
-            </p>
+            <p className={styles.hint}>{t.analyticsHint}</p>
           </section>
 
           <section className={styles.panelWide}>
-            <h2>Videos</h2>
+            <h2>{t.videos}</h2>
             <table className={styles.table}>
               <thead>
                 <tr>
-                  <th>Title</th>
-                  <th>Status</th>
-                  <th>Slug</th>
+                  <th>{t.title}</th>
+                  <th>{t.status}</th>
+                  <th>{t.slug}</th>
                 </tr>
               </thead>
               <tbody>
@@ -168,7 +175,7 @@ export default function OpsPage() {
                       <span data-status={v.status}>{v.status}</span>
                     </td>
                     <td className={styles.mono}>
-                      <Link href={`/watch/${v.slug}`}>{v.slug}</Link>
+                      <Link href={`/${locale}/watch/${v.slug}`}>{v.slug}</Link>
                     </td>
                   </tr>
                 ))}
@@ -177,7 +184,7 @@ export default function OpsPage() {
           </section>
 
           <section className={styles.panelWide}>
-            <h2>Crawl job</h2>
+            <h2>{t.crawl}</h2>
             <form className={styles.crawl} onSubmit={onCrawl}>
               <input
                 value={crawlUrl}
@@ -185,7 +192,7 @@ export default function OpsPage() {
                 placeholder="https://..."
               />
               <button type="submit" disabled={busy || !perms.includes("crawl:run")}>
-                Enqueue
+                {t.enqueue}
               </button>
             </form>
             <ul className={styles.jobs}>
@@ -202,6 +209,6 @@ export default function OpsPage() {
           {error ? <p className={styles.error}>{error}</p> : null}
         </div>
       )}
-    </main>
+    </>
   );
 }

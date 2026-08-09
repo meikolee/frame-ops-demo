@@ -66,3 +66,17 @@
   color: var(--mist);
   letter-spacing: 0.04em;
 }
+
+.back {
+  margin-top: 16px;
+}
+
+.back a {
+  color: var(--signal);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+}
+
+.back a:hover {
+  text-decoration: underline;
+}

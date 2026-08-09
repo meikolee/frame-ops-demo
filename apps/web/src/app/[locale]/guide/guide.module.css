@@ -1,0 +1,141 @@
+.page {
+  min-height: 100vh;
+  background:
+    radial-gradient(ellipse 40% 30% at 0% 0%, rgba(240, 162, 2, 0.07), transparent),
+    var(--ink);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
+  gap: 28px;
+  padding: 28px clamp(16px, 4vw, 48px) 80px;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.toc {
+  position: sticky;
+  top: 72px;
+  align-self: start;
+  border-left: 2px solid var(--line);
+  padding-left: 16px;
+}
+
+.tocTitle {
+  margin: 0 0 12px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  color: var(--signal);
+  text-transform: uppercase;
+}
+
+.toc ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.toc a {
+  color: var(--mist);
+  font-size: 0.88rem;
+  line-height: 1.35;
+}
+
+.toc a:hover {
+  color: var(--paper);
+}
+
+.article {
+  min-width: 0;
+}
+
+.hero {
+  margin-bottom: 36px;
+  animation: rise 0.55s ease both;
+}
+
+.kicker {
+  margin: 0 0 10px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.16em;
+  color: var(--mist);
+}
+
+.hero h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(2.2rem, 5vw, 3.4rem);
+  letter-spacing: -0.03em;
+}
+
+.subtitle {
+  margin: 14px 0 0;
+  max-width: 52ch;
+  color: var(--mist);
+  line-height: 1.55;
+}
+
+.section {
+  padding: 28px 0;
+  border-top: 1px solid var(--line);
+  animation: rise 0.5s ease both;
+}
+
+.section h2 {
+  margin: 0 0 14px;
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.body p {
+  margin: 0;
+  color: var(--paper);
+  line-height: 1.65;
+  max-width: 68ch;
+}
+
+.code {
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--signal);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--paper);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 860px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .toc {
+    position: static;
+    border-left: none;
+    padding-left: 0;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .toc ol {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+  }
+}

@@ -2,7 +2,12 @@
   min-height: 100vh;
   display: grid;
   grid-template-columns: 64px 1fr;
-  grid-template-rows: minmax(100vh, auto) auto;
+}
+
+.mainCol {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .rail {
@@ -158,7 +163,6 @@
 }
 
 .catalog {
-  grid-column: 2;
   padding: 56px clamp(28px, 5vw, 72px) 80px;
   border-top: 1px solid var(--line);
   background: var(--panel);
@@ -239,9 +243,5 @@
   .heroVisual {
     min-height: 42vh;
     order: -1;
-  }
-
-  .catalog {
-    grid-column: 1;
   }
 }

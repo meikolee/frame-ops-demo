@@ -3,14 +3,18 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getPublicVideo } from "@/lib/api";
 import { TrackView } from "@/components/TrackView";
+import { SiteHeader } from "@/components/SiteHeader";
+import { isLocale } from "@/i18n/config";
+import { getDictionary } from "@/i18n/get-dictionary";
 import styles from "./watch.module.css";
 
 export const revalidate = 30;
 
-type Props = { params: Promise<{ slug: string }> };
+type Props = { params: Promise<{ locale: string; slug: string }> };
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
-  const { slug } = await params;
+  const { locale: raw, slug } = await params;
+  const dict = isLocale(raw) ? await getDictionary(raw) : null;
   try {
     const video = await getPublicVideo(slug);
     return {
@@ -24,12 +28,16 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
       },
     };
   } catch {
-    return { title: "Not found" };
+    return { title: dict?.watch.notFound ?? "Not found" };
   }
 }
 
 export default async function WatchPage({ params }: Props) {
-  const { slug } = await params;
+  const { locale: raw, slug } = await params;
+  if (!isLocale(raw)) notFound();
+  const locale = raw;
+  const dict = await getDictionary(locale);
+
   let video;
   try {
     video = await getPublicVideo(slug);
@@ -46,6 +54,7 @@ export default async function WatchPage({ params }: Props) {
     uploadDate: video.publishedAt ?? video.createdAt,
     duration: `PT${Math.max(video.durationSec, 1)}S`,
     contentUrl: video.hlsPath,
+    inLanguage: locale === "zh" ? "zh-CN" : "en",
   };
 
   return (
@@ -54,12 +63,8 @@ export default async function WatchPage({ params }: Props) {
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
       />
-      <TrackView path={`/watch/${slug}`} videoId={video.id} />
-
-      <nav className={styles.nav}>
-        <Link href="/">FRAME</Link>
-        <Link href="/ops">Ops</Link>
-      </nav>
+      <TrackView path={`/${locale}/watch/${slug}`} videoId={video.id} />
+      <SiteHeader locale={locale} dict={dict} />
 
       <div className={styles.stage}>
         <div
@@ -72,12 +77,15 @@ export default async function WatchPage({ params }: Props) {
         >
           <div className={styles.overlay}>
             <p className={styles.hls}>
-              HLS master · <code>/api/videos/{video.id}/hls/master.m3u8</code>
+              {dict.watch.hls} · <code>/api/videos/{video.id}/hls/master.m3u8</code>
             </p>
             <h1>{video.title}</h1>
             <p className={styles.summary}>{video.summary}</p>
             <p className={styles.meta}>
-              SSR detail · ISR 30s · JSON-LD VideoObject · {video.viewCount} recorded views
+              {dict.watch.meta.replace("{views}", String(video.viewCount))}
+            </p>
+            <p className={styles.back}>
+              <Link href={`/${locale}/guide`}>{dict.nav.guide}</Link>
             </p>
           </div>
         </div>

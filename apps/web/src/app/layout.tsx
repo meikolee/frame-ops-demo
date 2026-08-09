@@ -1,5 +1,6 @@
-import type { Metadata } from "next";
+import { cookies } from "next/headers";
 import { IBM_Plex_Mono, IBM_Plex_Sans, Syne } from "next/font/google";
+import { isLocale } from "@/i18n/config";
 import "./globals.css";
 
 const syne = Syne({
@@ -20,24 +21,17 @@ const mono = IBM_Plex_Mono({
   weight: ["400", "500"],
 });
 
-export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3088"),
-  title: {
-    default: "FRAME — Media Ops Console",
-    template: "%s · FRAME",
-  },
-  description:
-    "Interview demo: Next.js App Router + NestJS media ops — HLS, RBAC, analytics, chunked upload.",
-  openGraph: {
-    title: "FRAME",
-    description: "Ship video with type-safe ops.",
-    type: "website",
-  },
-};
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const cookieLocale = (await cookies()).get("NEXT_LOCALE")?.value;
+  const locale = cookieLocale && isLocale(cookieLocale) ? cookieLocale : "zh";
+  const htmlLang = locale === "en" ? "en" : "zh-CN";
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="zh-CN" className={`${syne.variable} ${plex.variable} ${mono.variable}`}>
+    <html
+      lang={htmlLang}
+      className={`${syne.variable} ${plex.variable} ${mono.variable}`}
+      suppressHydrationWarning
+    >
       <body
         style={{
           fontFamily: "var(--font-plex), var(--font-body)",
