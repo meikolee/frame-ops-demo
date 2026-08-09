@@ -24,17 +24,23 @@ def chat(
     temperature: float = 0.4,
     timeout: int = 120,
     progress: ProgressCb | None = None,
+    json_mode: bool = True,
+    max_tokens: int | None = None,
 ) -> str:
     if not api_key.strip():
         raise DeepSeekError("请先填写 DeepSeek API Key")
 
     url = base_url.rstrip("/") + "/v1/chat/completions"
-    payload = {
+    payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": temperature,
         "stream": False,
     }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -52,6 +58,19 @@ def chat(
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
+        # Some gateways reject response_format; retry once without it.
+        if json_mode and e.code in (400, 422) and "response_format" in detail.lower():
+            return chat(
+                api_key=api_key,
+                messages=messages,
+                base_url=base_url,
+                model=model,
+                temperature=temperature,
+                timeout=timeout,
+                progress=progress,
+                json_mode=False,
+                max_tokens=max_tokens,
+            )
         raise DeepSeekError(f"HTTP {e.code}: {detail[:500]}") from e
     except urllib.error.URLError as e:
         raise DeepSeekError(f"网络错误：{e}") from e

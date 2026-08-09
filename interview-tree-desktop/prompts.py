@@ -7,27 +7,44 @@ from typing import Any
 
 
 SYSTEM_JSON = (
-    "你是资深全栈面试官与候选人教练。输出必须是合法 JSON，不要 Markdown 代码围栏，不要多余说明。"
+    "你是资深全栈面试官与候选人教练。输出必须是合法 JSON 对象，不要 Markdown 代码围栏，不要多余说明。"
 )
 
 
 def _extract_json(text: str) -> Any:
-    text = text.strip()
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("模型返回为空")
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end > start:
-            return json.loads(text[start : end + 1])
-        start = text.find("[")
-        end = text.rfind("]")
-        if start >= 0 and end > start:
-            return json.loads(text[start : end + 1])
-        raise
+        text = re.sub(r"\s*```$", "", text).strip()
+
+    candidates: list[str] = [text]
+    start_obj, end_obj = text.find("{"), text.rfind("}")
+    if start_obj >= 0 and end_obj > start_obj:
+        candidates.append(text[start_obj : end_obj + 1])
+    start_arr, end_arr = text.find("["), text.rfind("]")
+    if start_arr >= 0 and end_arr > start_arr:
+        candidates.append(text[start_arr : end_arr + 1])
+
+    last_err: Exception | None = None
+    for cand in candidates:
+        try:
+            return json.loads(cand)
+        except json.JSONDecodeError as e:
+            last_err = e
+            # trailing comma / truncated trailing garbage
+            repaired = re.sub(r",\s*([}\]])", r"\1", cand)
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError as e2:
+                last_err = e2
+
+    snippet = text[:240].replace("\n", " ")
+    raise ValueError(
+        f"无法解析模型 JSON（常见于输出被截断）。请再点一次刷新。"
+        f" 细节：{last_err}; 片段：{snippet}"
+    )
 
 
 def build_generate_messages(jd: str, extra: str = "") -> list[dict[str, str]]:
@@ -138,23 +155,27 @@ def build_sync_messages(
 def build_refresh_messages(
     jd: str, existing_outline: str, extra: str = ""
 ) -> list[dict[str, str]]:
-    user = f"""请在「保留并增强现有面试题树」的前提下刷新内容。
+    # Keep prompt small to reduce truncation / context overflow failures.
+    jd_short = (jd or "").strip()
+    if len(jd_short) > 1800:
+        jd_short = jd_short[:1800] + "\n…(JD 已截断)"
+    user = f"""请在「保留并增强现有面试题树」的前提下做一次小批量刷新。
 
 硬性规则：
 1. 禁止删除、替换、清空任何已有题目；只能追加新题，或补充已有题的答案/子追问
-2. 对已有题目：若能写得更好，输出 answer_supplement（增量补充段落，不要重复旧答案全文）
-3. 对缺口：输出全新一级题到 new_nodes
-4. 对已有一级题可追加 new_children（更深追问）
-5. 输出合法 JSON，不要 Markdown 围栏
+2. 本次必须控制体量：updates 最多 4 条，new_nodes 最多 3 条；每条 answer_supplement 不超过 120 字
+3. new_children 每个 update 最多 2 个，答案各不超过 80 字
+4. match_question 必须尽量贴合大纲里已有题干
+5. 只输出一个 JSON 对象，字段齐全但内容精简，确保完整可解析
 
 输出 JSON：
 {{
-  "title": "可选的新标题（可省略）",
+  "title": "可选",
   "updates": [
     {{
-      "match_question": "必须与现有某题高度相近的题干，用于定位",
-      "answer_supplement": "追加到原答案末尾的补充（可空）",
-      "tags_add": ["新标签"],
+      "match_question": "与现有某题相近的题干",
+      "answer_supplement": "增量补充（可空字符串）",
+      "tags_add": ["标签"],
       "new_children": [
         {{"question":"...","answer":"...","tags":["..."],"children":[]}}
       ]
@@ -166,13 +187,13 @@ def build_refresh_messages(
 }}
 
 职位描述：
-{jd}
+{jd_short}
 
-现有题树大纲（勿删除这些题）：
+现有题树大纲（勿删除）：
 {existing_outline or "(空树)"}
 
 补充要求：
-{extra or "无"}
+{extra or "优先补 JD 缺口与薄弱答案"}
 """
     return [
         {"role": "system", "content": SYSTEM_JSON},
@@ -182,14 +203,17 @@ def build_refresh_messages(
 
 def parse_refresh_payload(text: str) -> dict[str, Any]:
     data = _extract_json(text)
+    if isinstance(data, list):
+        # model sometimes returns bare node list
+        return {"title": None, "updates": [], "new_nodes": data}
     if not isinstance(data, dict):
         raise ValueError("刷新结果不是 JSON 对象")
+    updates = data.get("updates")
+    new_nodes = data.get("new_nodes") or data.get("nodes") or data.get("children")
     return {
         "title": data.get("title"),
-        "updates": data.get("updates") if isinstance(data.get("updates"), list) else [],
-        "new_nodes": data.get("new_nodes")
-        if isinstance(data.get("new_nodes"), list)
-        else [],
+        "updates": updates if isinstance(updates, list) else [],
+        "new_nodes": new_nodes if isinstance(new_nodes, list) else [],
     }
 
 

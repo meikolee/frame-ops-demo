@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import sys
 import uuid
 from copy import deepcopy
@@ -16,6 +18,32 @@ def utc_now() -> str:
 
 def new_id(prefix: str = "n") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
+
+
+def coerce_tags(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        parts = re.split(r"[,，;/|]", raw) if any(ch in raw for ch in ",，;/|") else [raw]
+        return [p.strip() for p in parts if p.strip()]
+    if isinstance(raw, (list, tuple, set)):
+        out: list[str] = []
+        for t in raw:
+            if t is None:
+                continue
+            s = str(t).strip()
+            if s:
+                out.append(s)
+        return out
+    return [str(raw).strip()] if str(raw).strip() else []
+
+
+def coerce_children(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, list):
+        return [c for c in raw if isinstance(c, dict)]
+    if isinstance(raw, dict):
+        return [raw]
+    return []
 
 
 def app_dir() -> Path:
@@ -37,6 +65,106 @@ def config_path() -> Path:
 
 def tree_path() -> Path:
     return data_dir() / "interview_tree.json"
+
+
+# ----- 多棵树管理（manifest: data/trees.json） -----
+
+
+def trees_manifest_path() -> Path:
+    return data_dir() / "trees.json"
+
+
+def _default_manifest() -> dict[str, Any]:
+    return {
+        "current": "default",
+        "trees": [{"id": "default", "title": "面试题树", "file": "interview_tree.json"}],
+    }
+
+
+def save_trees_manifest(manifest: dict[str, Any]) -> None:
+    trees_manifest_path().write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def load_trees_manifest() -> dict[str, Any]:
+    path = trees_manifest_path()
+    if not path.exists():
+        manifest = _default_manifest()
+        # 迁移：保留旧 interview_tree.json 的标题
+        if tree_path().exists():
+            try:
+                old = normalize_tree(json.loads(tree_path().read_text(encoding="utf-8")))
+                manifest["trees"][0]["title"] = old.get("title") or "面试题树"
+            except Exception:
+                pass
+        save_trees_manifest(manifest)
+        return manifest
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        manifest = _default_manifest()
+        save_trees_manifest(manifest)
+        return manifest
+
+
+def list_trees() -> list[dict[str, Any]]:
+    return load_trees_manifest().get("trees") or []
+
+
+def current_tree_id() -> str:
+    return str(load_trees_manifest().get("current") or "default")
+
+
+def tree_file_for(tree_id: str) -> Path:
+    if tree_id == "default":
+        return tree_path()
+    return data_dir() / "trees" / f"{tree_id}.json"
+
+
+def create_tree(title: str = "新题库") -> dict[str, Any]:
+    manifest = load_trees_manifest()
+    tid = f"t_{uuid.uuid4().hex[:10]}"
+    entry = {"id": tid, "title": title, "file": f"trees/{tid}.json"}
+    (manifest.setdefault("trees", [])).append(entry)
+    manifest["current"] = tid
+    save_trees_manifest(manifest)
+    save_tree(empty_tree(title))
+    return entry
+
+
+def switch_tree(tree_id: str) -> None:
+    manifest = load_trees_manifest()
+    if not any(t.get("id") == tree_id for t in manifest.get("trees") or []):
+        return
+    manifest["current"] = tree_id
+    save_trees_manifest(manifest)
+
+
+def rename_tree(tree_id: str, title: str) -> None:
+    manifest = load_trees_manifest()
+    for t in manifest.get("trees") or []:
+        if t.get("id") == tree_id:
+            t["title"] = title
+    save_trees_manifest(manifest)
+
+
+def delete_tree(tree_id: str) -> None:
+    manifest = load_trees_manifest()
+    trees = manifest.get("trees") or []
+    if len(trees) <= 1:
+        raise ValueError("至少保留一棵题树")
+    trees = [t for t in trees if t.get("id") != tree_id]
+    manifest["trees"] = trees
+    if manifest.get("current") == tree_id:
+        manifest["current"] = trees[0]["id"]
+    save_trees_manifest(manifest)
+    path = tree_file_for(tree_id)
+    if path.exists():
+        try:
+            path.unlink()
+        except Exception:
+            pass
 
 
 def load_config() -> dict[str, Any]:
@@ -68,15 +196,12 @@ def empty_tree(title: str = "面试题树") -> dict[str, Any]:
 
 
 def normalize_node(raw: dict[str, Any]) -> dict[str, Any]:
-    children_raw = raw.get("children") or []
-    children = [
-        normalize_node(c) for c in children_raw if isinstance(c, dict)
-    ]
+    children = [normalize_node(c) for c in coerce_children(raw.get("children"))]
     return {
         "id": str(raw.get("id") or new_id()),
         "question": str(raw.get("question") or "").strip() or "（未命名问题）",
         "answer": str(raw.get("answer") or "").strip(),
-        "tags": [str(t) for t in (raw.get("tags") or [])],
+        "tags": coerce_tags(raw.get("tags")),
         "children": children,
         "updated_at": str(raw.get("updated_at") or utc_now()),
         "source": str(raw.get("source") or "deepseek"),
@@ -88,13 +213,14 @@ def normalize_tree(raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "version": int(raw.get("version") or 1),
         "title": str(raw.get("title") or "面试题树"),
+        "jd": str(raw.get("jd") or ""),
         "updated_at": str(raw.get("updated_at") or utc_now()),
         "nodes": nodes,
     }
 
 
 def load_tree() -> dict[str, Any]:
-    path = tree_path()
+    path = tree_file_for(current_tree_id())
     if not path.exists():
         return empty_tree()
     return normalize_tree(json.loads(path.read_text(encoding="utf-8")))
@@ -103,7 +229,15 @@ def load_tree() -> dict[str, Any]:
 def save_tree(tree: dict[str, Any]) -> None:
     tree = normalize_tree(tree)
     tree["updated_at"] = utc_now()
-    tree_path().write_text(
+    path = tree_file_for(current_tree_id())
+    # 自动备份上一版，防止写坏后全丢
+    if path.exists():
+        try:
+            shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+        except Exception:
+            pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
         json.dumps(tree, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
@@ -141,7 +275,7 @@ def walk(nodes: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
         yield from walk(n.get("children") or [])
 
 
-def tree_outline(tree: dict[str, Any], limit: int = 80) -> str:
+def tree_outline(tree: dict[str, Any], limit: int = 40) -> str:
     lines: list[str] = []
 
     def walk_lines(nodes: list[dict[str, Any]], depth: int) -> None:
@@ -260,18 +394,17 @@ def merge_refresh_into_tree(
                 node["source"] = "deepseek-refresh"
                 stats["supplemented"] += 1
 
-        tags_add = upd.get("tags_add") or []
-        if isinstance(tags_add, list) and tags_add:
+        tags_add = upd.get("tags_add") or upd.get("tags") or []
+        if tags_add:
             merged = list(node.get("tags") or [])
-            for t in tags_add:
-                ts = str(t).strip()
+            for ts in coerce_tags(tags_add):
                 if ts and ts not in merged:
                     merged.append(ts)
             node["tags"] = merged
 
-        kids = upd.get("new_children") or []
-        if isinstance(kids, list) and kids:
-            stats["child_added"] += _merge_unique_children(node, kids)
+        kids = upd.get("new_children") or upd.get("children") or []
+        if kids:
+            stats["child_added"] += _merge_unique_children(node, coerce_children(kids))
 
     for raw in payload.get("new_nodes") or []:
         if not isinstance(raw, dict):
@@ -289,9 +422,11 @@ def merge_refresh_into_tree(
                 existing["answer"] = f"{old}\n\n【补充】{ans}".strip() if old else ans
                 existing["updated_at"] = utc_now()
                 stats["supplemented"] += 1
-            kids = raw.get("children") or []
-            if isinstance(kids, list) and kids:
-                stats["child_added"] += _merge_unique_children(existing, kids)
+            kids = raw.get("children") or raw.get("new_children") or []
+            if kids:
+                stats["child_added"] += _merge_unique_children(
+                    existing, coerce_children(kids)
+                )
             continue
         nodes.append(normalize_node({**raw, "source": "deepseek-refresh"}))
         stats["added"] += 1
@@ -338,6 +473,128 @@ def export_markdown(tree: dict[str, Any]) -> str:
 
     render(tree.get("nodes") or [], 0)
     return "\n".join(lines)
+
+
+def export_html(tree: dict[str, Any]) -> str:
+    parts = [
+        "<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>",
+        "<title>" + (tree.get("title") or "面试题树") + "</title>",
+        "<style>",
+        "body{font-family:'Microsoft YaHei','PingFang SC',sans-serif;line-height:1.7;max-width:880px;margin:32px auto;padding:0 20px;color:#1a1a1a}",
+        "h1{border-bottom:2px solid #333;padding-bottom:8px}",
+        "h2,h3,h4{margin-top:24px;color:#0b3d91}",
+        ".tags{color:#667;font-size:.85em}",
+        ".answer{white-space:pre-wrap;background:#f6f8fa;border-left:3px solid #0b3d91;padding:10px 14px;border-radius:4px}",
+        "</style></head><body>",
+    ]
+    title = (tree.get("title") or "面试题树").replace("<", "&lt;")
+    parts.append(f"<h1>{title}</h1>")
+    jd = (tree.get("jd") or "").strip()
+    if jd:
+        esc = jd.replace("&", "&amp;").replace("<", "&lt;")
+        parts.append(f"<h2>职位描述</h2><div class='answer'>{esc}</div>")
+
+    def esc(s: str) -> str:
+        return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def render(nodes: list[dict[str, Any]], level: int) -> None:
+        for n in nodes:
+            tag = f"h{min(level + 2, 5)}"
+            tags = ", ".join(n.get("tags") or [])
+            parts.append(f"<{tag}>{esc(n.get('question'))}</{tag}>")
+            if tags:
+                parts.append(f"<div class='tags'>标签：{esc(tags)}</div>")
+            parts.append(f"<div class='answer'>{esc(n.get('answer') or '（暂无答案）')}</div>")
+            render(n.get("children") or [], level + 1)
+
+    render(tree.get("nodes") or [], 0)
+    parts.append("</body></html>")
+    return "\n".join(parts)
+
+
+def export_pdf(tree: dict[str, Any], path: str | Path) -> None:
+    """导出 PDF（reportlab，内置 STSong 中文字体，无需额外字体文件）。"""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+
+    h1 = ParagraphStyle("h1", fontName="STSong-Light", fontSize=22, leading=30, spaceAfter=10)
+    h2 = ParagraphStyle("h2", fontName="STSong-Light", fontSize=16, leading=24, spaceBefore=12)
+    h3 = ParagraphStyle("h3", fontName="STSong-Light", fontSize=14, leading=22, spaceBefore=10)
+    h4 = ParagraphStyle("h4", fontName="STSong-Light", fontSize=12, leading=20, spaceBefore=8)
+    body = ParagraphStyle(
+        "body", fontName="STSong-Light", fontSize=11, leading=18, spaceBefore=4
+    )
+
+    def esc(s: str) -> str:
+        return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    story = [Paragraph(esc(tree.get("title") or "面试题树"), h1)]
+    jd = (tree.get("jd") or "").strip()
+    if jd:
+        story.append(Paragraph("职位描述", h2))
+        for line in jd.splitlines():
+            story.append(Paragraph(esc(line), body))
+
+    def render(nodes: list[dict[str, Any]], level: int) -> None:
+        for n in nodes:
+            tag = (h2, h3, h4)[min(level, 2)]
+            story.append(Paragraph(esc(n.get("question")), tag))
+            tags = ", ".join(n.get("tags") or [])
+            if tags:
+                story.append(Paragraph(f"标签：{esc(tags)}", body))
+            story.append(Paragraph(esc(n.get("answer") or "（暂无答案）"), body))
+            story.append(Spacer(1, 3 * mm))
+            render(n.get("children") or [], level + 1)
+
+    render(tree.get("nodes") or [], 0)
+    doc = SimpleDocTemplate(str(path), pagesize=A4, title=str(tree.get("title") or "面试题树"))
+    doc.build(story)
+
+
+def filter_tree(tree: dict[str, Any], query: str) -> dict[str, Any]:
+    """返回只含命中节点及其祖先的子集；query 为空返回整树深拷贝。"""
+    q = (query or "").strip().lower()
+    if not q:
+        return deep_copy_tree(tree)
+
+    def matches(n: dict[str, Any]) -> bool:
+        return (
+            q in (n.get("question") or "").lower()
+            or q in (n.get("answer") or "").lower()
+            or any(q in (t or "").lower() for t in (n.get("tags") or []))
+        )
+
+    def filter_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for n in nodes:
+            children = filter_nodes(n.get("children") or [])
+            if matches(n) or children:
+                c = deepcopy(n)
+                c["children"] = children
+                out.append(c)
+        return out
+
+    result = deep_copy_tree(tree)
+    result["nodes"] = filter_nodes(result.get("nodes") or [])
+    return result
+
+
+def tree_stats(tree: dict[str, Any]) -> dict[str, int]:
+    nodes = list(walk(tree.get("nodes") or []))
+    tags: set[str] = set()
+    for n in nodes:
+        tags.update(t for t in (n.get("tags") or []) if t)
+    return {
+        "total": len(nodes),
+        "roots": len(tree.get("nodes") or []),
+        "tags": len(tags),
+    }
 
 
 def seed_offline_tree(jd: str) -> dict[str, Any]:
