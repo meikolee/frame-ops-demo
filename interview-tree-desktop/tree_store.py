@@ -141,6 +141,165 @@ def walk(nodes: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
         yield from walk(n.get("children") or [])
 
 
+def tree_outline(tree: dict[str, Any], limit: int = 80) -> str:
+    lines: list[str] = []
+
+    def walk_lines(nodes: list[dict[str, Any]], depth: int) -> None:
+        for n in nodes:
+            if len(lines) >= limit:
+                return
+            indent = "  " * depth
+            lines.append(f"{indent}- {n.get('question') or ''}")
+            walk_lines(n.get("children") or [], depth + 1)
+
+    walk_lines(tree.get("nodes") or [], 0)
+    if not lines:
+        return "(空树)"
+    more = ""
+    # Count remaining roughly
+    total = sum(1 for _ in walk(tree.get("nodes") or []))
+    if total > limit:
+        more = f"\n… 另有约 {total - limit} 题未列出"
+    return "\n".join(lines) + more
+
+
+def _norm_q(text: str) -> str:
+    s = "".join(ch for ch in (text or "").lower() if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+    return s
+
+
+def _questions_similar(a: str, b: str) -> bool:
+    na, nb = _norm_q(a), _norm_q(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    if len(na) >= 8 and (na in nb or nb in na):
+        return True
+    # lightweight token overlap for Chinese/English mix
+    if len(na) >= 12 and len(nb) >= 12:
+        shorter, longer = (na, nb) if len(na) <= len(nb) else (nb, na)
+        hit = sum(1 for i in range(0, len(shorter) - 3) if shorter[i : i + 4] in longer)
+        return hit >= max(3, len(shorter) // 8)
+    return False
+
+
+def find_node_by_question(
+    nodes: list[dict[str, Any]], question: str
+) -> dict[str, Any] | None:
+    for n in nodes:
+        if _questions_similar(n.get("question") or "", question):
+            return n
+        hit = find_node_by_question(n.get("children") or [], question)
+        if hit is not None:
+            return hit
+    return None
+
+
+def _merge_unique_children(
+    node: dict[str, Any], children: list[dict[str, Any]]
+) -> int:
+    existing = node.setdefault("children", [])
+    added = 0
+    for raw in children:
+        if not isinstance(raw, dict):
+            continue
+        q = str(raw.get("question") or "")
+        if any(_questions_similar(c.get("question") or "", q) for c in existing):
+            continue
+        existing.append(normalize_node({**raw, "source": raw.get("source") or "deepseek-refresh"}))
+        added += 1
+    if added:
+        node["updated_at"] = utc_now()
+    return added
+
+
+def merge_refresh_into_tree(
+    tree: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, int]:
+    """Append/supplement only — never deletes existing nodes."""
+    stats = {"added": 0, "supplemented": 0, "child_added": 0}
+    nodes = tree.setdefault("nodes", [])
+
+    title = payload.get("title")
+    if isinstance(title, str) and title.strip():
+        tree["title"] = title.strip()
+
+    for upd in payload.get("updates") or []:
+        if not isinstance(upd, dict):
+            continue
+        match_q = str(upd.get("match_question") or "").strip()
+        if not match_q:
+            continue
+        node = find_node_by_question(nodes, match_q)
+        if node is None:
+            # treat unmatched update as a new root node if it has content
+            q = match_q
+            a = str(upd.get("answer_supplement") or "").strip()
+            if q:
+                nodes.append(
+                    normalize_node(
+                        {
+                            "question": q,
+                            "answer": a,
+                            "tags": upd.get("tags_add") or [],
+                            "children": upd.get("new_children") or [],
+                            "source": "deepseek-refresh",
+                        }
+                    )
+                )
+                stats["added"] += 1
+            continue
+
+        supplement = str(upd.get("answer_supplement") or "").strip()
+        if supplement:
+            old = (node.get("answer") or "").strip()
+            if supplement not in old:
+                node["answer"] = f"{old}\n\n【补充】{supplement}".strip() if old else supplement
+                node["updated_at"] = utc_now()
+                node["source"] = "deepseek-refresh"
+                stats["supplemented"] += 1
+
+        tags_add = upd.get("tags_add") or []
+        if isinstance(tags_add, list) and tags_add:
+            merged = list(node.get("tags") or [])
+            for t in tags_add:
+                ts = str(t).strip()
+                if ts and ts not in merged:
+                    merged.append(ts)
+            node["tags"] = merged
+
+        kids = upd.get("new_children") or []
+        if isinstance(kids, list) and kids:
+            stats["child_added"] += _merge_unique_children(node, kids)
+
+    for raw in payload.get("new_nodes") or []:
+        if not isinstance(raw, dict):
+            continue
+        q = str(raw.get("question") or "").strip()
+        if not q:
+            continue
+        if find_node_by_question(nodes, q) is not None:
+            # already exists — merge children / supplement instead of duplicating root
+            existing = find_node_by_question(nodes, q)
+            assert existing is not None
+            ans = str(raw.get("answer") or "").strip()
+            if ans and ans not in (existing.get("answer") or ""):
+                old = (existing.get("answer") or "").strip()
+                existing["answer"] = f"{old}\n\n【补充】{ans}".strip() if old else ans
+                existing["updated_at"] = utc_now()
+                stats["supplemented"] += 1
+            kids = raw.get("children") or []
+            if isinstance(kids, list) and kids:
+                stats["child_added"] += _merge_unique_children(existing, kids)
+            continue
+        nodes.append(normalize_node({**raw, "source": "deepseek-refresh"}))
+        stats["added"] += 1
+
+    tree["updated_at"] = utc_now()
+    return stats
+
+
 def attach_children(node: dict[str, Any], children: list[dict[str, Any]]) -> None:
     existing = node.setdefault("children", [])
     for c in children:

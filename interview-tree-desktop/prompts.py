@@ -135,6 +135,64 @@ def build_sync_messages(
     ]
 
 
+def build_refresh_messages(
+    jd: str, existing_outline: str, extra: str = ""
+) -> list[dict[str, str]]:
+    user = f"""请在「保留并增强现有面试题树」的前提下刷新内容。
+
+硬性规则：
+1. 禁止删除、替换、清空任何已有题目；只能追加新题，或补充已有题的答案/子追问
+2. 对已有题目：若能写得更好，输出 answer_supplement（增量补充段落，不要重复旧答案全文）
+3. 对缺口：输出全新一级题到 new_nodes
+4. 对已有一级题可追加 new_children（更深追问）
+5. 输出合法 JSON，不要 Markdown 围栏
+
+输出 JSON：
+{{
+  "title": "可选的新标题（可省略）",
+  "updates": [
+    {{
+      "match_question": "必须与现有某题高度相近的题干，用于定位",
+      "answer_supplement": "追加到原答案末尾的补充（可空）",
+      "tags_add": ["新标签"],
+      "new_children": [
+        {{"question":"...","answer":"...","tags":["..."],"children":[]}}
+      ]
+    }}
+  ],
+  "new_nodes": [
+    {{"question":"...","answer":"...","tags":["..."],"children":[]}}
+  ]
+}}
+
+职位描述：
+{jd}
+
+现有题树大纲（勿删除这些题）：
+{existing_outline or "(空树)"}
+
+补充要求：
+{extra or "无"}
+"""
+    return [
+        {"role": "system", "content": SYSTEM_JSON},
+        {"role": "user", "content": user},
+    ]
+
+
+def parse_refresh_payload(text: str) -> dict[str, Any]:
+    data = _extract_json(text)
+    if not isinstance(data, dict):
+        raise ValueError("刷新结果不是 JSON 对象")
+    return {
+        "title": data.get("title"),
+        "updates": data.get("updates") if isinstance(data.get("updates"), list) else [],
+        "new_nodes": data.get("new_nodes")
+        if isinstance(data.get("new_nodes"), list)
+        else [],
+    }
+
+
 def parse_generate_payload(text: str) -> dict[str, Any]:
     data = _extract_json(text)
     if isinstance(data, list):

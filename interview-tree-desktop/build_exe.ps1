@@ -33,6 +33,11 @@ if (-not (Test-Path -LiteralPath $src)) {
 }
 
 $dstRoot = Join-Path (Split-Path -Parent $Root) 'FrameInterviewTree.exe'
-Copy-Item -LiteralPath $src -Destination $dstRoot -Force
+try {
+  Copy-Item -LiteralPath $src -Destination $dstRoot -Force
+  Write-Host "Copied: $dstRoot"
+} catch {
+  Write-Host "WARN: could not overwrite $dstRoot (close FrameInterviewTree.exe first)"
+  Write-Host "Built OK at: $src"
+}
 Write-Host "Built: $src"
-Write-Host "Copied: $dstRoot"

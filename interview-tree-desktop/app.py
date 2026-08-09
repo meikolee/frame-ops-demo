@@ -16,9 +16,11 @@ from deepseek_client import chat, test_connection
 from prompts import (
     build_expand_messages,
     build_generate_messages,
+    build_refresh_messages,
     build_sync_messages,
     parse_expand_payload,
     parse_generate_payload,
+    parse_refresh_payload,
     parse_sync_payload,
 )
 from tree_store import (
@@ -27,12 +29,14 @@ from tree_store import (
     find_node,
     load_config,
     load_tree,
+    merge_refresh_into_tree,
     normalize_tree,
     path_to_node,
     replace_node_content,
     save_config,
     save_tree,
     seed_offline_tree,
+    tree_outline,
     tree_path,
 )
 
@@ -72,12 +76,6 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("FRAME 面试题树 · DeepSeek")
-        self.geometry("1280x820")
-        self.minsize(960, 640)
-        try:
-            self.tk.call("tk", "scaling", 1.25)
-        except tk.TclError:
-            pass
 
         self.tree_data = load_tree()
         self.cfg = load_config()
@@ -98,11 +96,12 @@ class App(tk.Tk):
 
     def _setup_fonts(self) -> None:
         family = pick_ui_font_family(self)
-        self.font_ui = tkfont.Font(family=family, size=11)
-        self.font_ui_bold = tkfont.Font(family=family, size=12, weight="bold")
-        self.font_body = tkfont.Font(family=family, size=12)
-        self.font_tree = tkfont.Font(family=family, size=11)
-        self.font_status = tkfont.Font(family=family, size=10)
+        # Previous baseline 10/11/9 × 1.4 ≈ 14/15/13
+        self.font_ui = tkfont.Font(family=family, size=14)
+        self.font_ui_bold = tkfont.Font(family=family, size=15, weight="bold")
+        self.font_body = tkfont.Font(family=family, size=15)
+        self.font_tree = tkfont.Font(family=family, size=14)
+        self.font_status = tkfont.Font(family=family, size=13)
 
         style = ttk.Style(self)
         try:
@@ -115,88 +114,156 @@ class App(tk.Tk):
 
         style.configure(".", font=self.font_ui)
         style.configure("TLabel", font=self.font_ui)
-        style.configure("TButton", font=self.font_ui)
+        style.configure("TButton", font=self.font_ui, padding=(8, 4))
         style.configure("TEntry", font=self.font_ui)
         style.configure("TSpinbox", font=self.font_ui)
-        style.configure("Treeview", font=self.font_tree, rowheight=28)
+        style.configure("Treeview", font=self.font_tree, rowheight=36)
         style.configure("Treeview.Heading", font=self.font_ui_bold)
         style.configure("Title.TLabel", font=self.font_ui_bold)
+        style.configure("Card.TFrame", relief="solid", borderwidth=1)
 
     # ----- UI -----
     def _build_ui(self) -> None:
+        LEFT_W = 380
+        RIGHT_W = 420
+
+        self.geometry("1360x860")
+        self.minsize(1180, 740)
+        try:
+            self.tk.call("tk", "scaling", 1.0)
+        except tk.TclError:
+            pass
+
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
-        paned.grid(row=0, column=0, sticky="nsew")
+        body = ttk.Frame(self)
+        body.grid(row=0, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=0, minsize=LEFT_W)
+        body.columnconfigure(1, weight=1, minsize=420)
+        body.columnconfigure(2, weight=0, minsize=RIGHT_W)
+        body.rowconfigure(0, weight=1)
 
-        left = ttk.Frame(paned, padding=8)
-        mid = ttk.Frame(paned, padding=8)
-        right = ttk.Frame(paned, padding=8)
-        paned.add(left, weight=2)
-        paned.add(mid, weight=3)
-        paned.add(right, weight=2)
+        # Fixed-width side panels (grid_propagate False keeps size stable)
+        left = ttk.Frame(body, style="Card.TFrame", padding=8, width=LEFT_W)
+        left.grid(row=0, column=0, sticky="nsew", padx=(8, 4), pady=8)
+        left.grid_propagate(False)
+        left.configure(width=LEFT_W)
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(3, weight=1)  # JD text grows within left only
 
-        # left: config + JD
-        ttk.Label(left, text="DeepSeek 接入", style="Title.TLabel").pack(anchor="w")
+        mid = ttk.Frame(body, style="Card.TFrame", padding=8)
+        mid.grid(row=0, column=1, sticky="nsew", padx=4, pady=8)
+        mid.columnconfigure(0, weight=1)
+        mid.rowconfigure(1, weight=1)
+
+        right = ttk.Frame(body, style="Card.TFrame", padding=8, width=RIGHT_W)
+        right.grid(row=0, column=2, sticky="nsew", padx=(4, 8), pady=8)
+        right.grid_propagate(False)
+        right.configure(width=RIGHT_W)
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(4, weight=1)  # answer box expands within right panel only
+
+        # ---- left: config + JD + actions ----
+        ttk.Label(left, text="DeepSeek 接入", style="Title.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+
         form = ttk.Frame(left)
-        form.pack(fill=tk.X, pady=4)
+        form.grid(row=1, column=0, sticky="ew", pady=4)
+        form.columnconfigure(1, weight=1)
         ttk.Label(form, text="API Key").grid(row=0, column=0, sticky="w")
         self.api_key = ttk.Entry(form, show="*")
         self.api_key.insert(0, self.cfg.get("api_key", ""))
-        self.api_key.grid(row=0, column=1, sticky="ew", pady=2)
+        self.api_key.grid(row=0, column=1, sticky="ew", pady=2, padx=(6, 0))
         ttk.Label(form, text="Base URL").grid(row=1, column=0, sticky="w")
         self.base_url = ttk.Entry(form)
         self.base_url.insert(0, self.cfg.get("base_url") or DEFAULT_BASE_URL)
-        self.base_url.grid(row=1, column=1, sticky="ew", pady=2)
+        self.base_url.grid(row=1, column=1, sticky="ew", pady=2, padx=(6, 0))
         ttk.Label(form, text="Model").grid(row=2, column=0, sticky="w")
         self.model = ttk.Entry(form)
         self.model.insert(0, self.cfg.get("model") or DEFAULT_MODEL)
-        self.model.grid(row=2, column=1, sticky="ew", pady=2)
-        form.columnconfigure(1, weight=1)
-        ttk.Button(left, text="测试连接", command=self.on_test).pack(anchor="w", pady=4)
-
-        ttk.Label(left, text="职位描述（可编辑后解析）", style="Title.TLabel").pack(
-            anchor="w", pady=(10, 2)
+        self.model.grid(row=2, column=1, sticky="ew", pady=2, padx=(6, 0))
+        ttk.Button(form, text="测试连接", command=self.on_test).grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0)
         )
-        self.jd_edit = tk.Text(left, height=14, wrap=tk.WORD, font=self.font_body, undo=True)
+
+        ttk.Label(left, text="职位描述", style="Title.TLabel").grid(
+            row=2, column=0, sticky="w", pady=(8, 2)
+        )
+        jd_box = ttk.Frame(left)
+        jd_box.grid(row=3, column=0, sticky="nsew")
+        jd_box.columnconfigure(0, weight=1)
+        jd_box.rowconfigure(0, weight=1)
+        self.jd_edit = tk.Text(
+            jd_box, wrap=tk.WORD, font=self.font_body, undo=True, height=8, width=36
+        )
         self.jd_edit.insert("1.0", self.cfg.get("jd_text") or DEFAULT_JD)
-        self.jd_edit.pack(fill=tk.BOTH, expand=True)
+        self.jd_edit.grid(row=0, column=0, sticky="nsew")
+        jd_scroll = ttk.Scrollbar(jd_box, orient=tk.VERTICAL, command=self.jd_edit.yview)
+        jd_scroll.grid(row=0, column=1, sticky="ns")
+        self.jd_edit.configure(yscrollcommand=jd_scroll.set)
 
-        ttk.Label(left, text="生成补充说明（可选）").pack(anchor="w", pady=(8, 2))
-        self.extra_edit = tk.Text(left, height=3, wrap=tk.WORD, font=self.font_body, undo=True)
-        self.extra_edit.pack(fill=tk.X)
+        ttk.Label(left, text="生成补充说明（可选）").grid(row=4, column=0, sticky="w", pady=(6, 2))
+        self.extra_edit = tk.Text(
+            left, height=3, wrap=tk.WORD, font=self.font_body, undo=True, width=36
+        )
+        self.extra_edit.grid(row=5, column=0, sticky="ew")
 
-        row = ttk.Frame(left)
-        row.pack(fill=tk.X, pady=6)
-        ttk.Label(row, text="每次展开子题数").pack(side=tk.LEFT)
+        spin_row = ttk.Frame(left)
+        spin_row.grid(row=6, column=0, sticky="ew", pady=6)
+        ttk.Label(spin_row, text="每次展开子题数").pack(side=tk.LEFT)
         self.expand_count = tk.IntVar(value=3)
-        ttk.Spinbox(row, from_=1, to=6, textvariable=self.expand_count, width=5).pack(
+        ttk.Spinbox(spin_row, from_=1, to=6, textvariable=self.expand_count, width=5).pack(
             side=tk.LEFT, padx=6
         )
 
-        self.btn_generate = ttk.Button(left, text="① 解析 JD 并生成题树", command=self.on_generate)
-        self.btn_generate.pack(fill=tk.X, pady=2)
-        self.btn_offline = ttk.Button(left, text="离线种子树", command=self.on_offline_seed)
-        self.btn_offline.pack(fill=tk.X, pady=2)
-        self.btn_expand = ttk.Button(left, text="② 展开选中节点（生长）", command=self.on_expand)
-        self.btn_expand.pack(fill=tk.X, pady=2)
-        self.btn_sync = ttk.Button(left, text="③ 联网同步选中节点", command=self.on_sync)
-        self.btn_sync.pack(fill=tk.X, pady=2)
+        actions = ttk.Frame(left)
+        actions.grid(row=7, column=0, sticky="ew")
+        actions.columnconfigure(0, weight=1)
+        self.btn_generate = ttk.Button(
+            actions, text="① 解析 JD 并生成题树", command=self.on_generate
+        )
+        self.btn_generate.grid(row=0, column=0, sticky="ew", pady=1)
+        self.btn_offline = ttk.Button(actions, text="离线种子树", command=self.on_offline_seed)
+        self.btn_offline.grid(row=1, column=0, sticky="ew", pady=1)
+        self.btn_expand = ttk.Button(
+            actions, text="② 展开选中节点（生长）", command=self.on_expand
+        )
+        self.btn_expand.grid(row=2, column=0, sticky="ew", pady=1)
+        self.btn_sync = ttk.Button(
+            actions, text="③ 联网同步选中节点", command=self.on_sync
+        )
+        self.btn_sync.grid(row=3, column=0, sticky="ew", pady=1)
+        self.btn_refresh = ttk.Button(
+            actions, text="④ 刷新题树（追加/补充，不删除）", command=self.on_refresh
+        )
+        self.btn_refresh.grid(row=4, column=0, sticky="ew", pady=1)
 
-        row2 = ttk.Frame(left)
-        row2.pack(fill=tk.X, pady=6)
-        self.btn_save = ttk.Button(row2, text="保存到本地", command=self.on_save)
-        self.btn_save.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
-        self.btn_export = ttk.Button(row2, text="导出 Markdown", command=self.on_export)
-        self.btn_export.pack(side=tk.LEFT, expand=True, fill=tk.X)
+        save_row = ttk.Frame(actions)
+        save_row.grid(row=5, column=0, sticky="ew", pady=(4, 0))
+        save_row.columnconfigure(0, weight=1)
+        save_row.columnconfigure(1, weight=1)
+        self.btn_save = ttk.Button(save_row, text="保存到本地", command=self.on_save)
+        self.btn_save.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        self.btn_export = ttk.Button(save_row, text="导出 Markdown", command=self.on_export)
+        self.btn_export.grid(row=0, column=1, sticky="ew", padx=(3, 0))
 
-        # mid: tree
-        ttk.Label(
-            mid, text="面试题树（点选后右侧可编辑，可向下生长）", style="Title.TLabel"
-        ).pack(anchor="w")
+        # ---- mid: tree ----
+        mid_head = ttk.Frame(mid)
+        mid_head.grid(row=0, column=0, sticky="ew")
+        mid_head.columnconfigure(0, weight=1)
+        ttk.Label(mid_head, text="面试题树", style="Title.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Button(mid_head, text="刷新（追加补充）", command=self.on_refresh).grid(
+            row=0, column=1, sticky="e"
+        )
+
         tree_wrap = ttk.Frame(mid)
-        tree_wrap.pack(fill=tk.BOTH, expand=True, pady=4)
+        tree_wrap.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        tree_wrap.columnconfigure(0, weight=1)
+        tree_wrap.rowconfigure(0, weight=1)
         self.tree = ttk.Treeview(
             tree_wrap,
             columns=("tags", "kids"),
@@ -206,35 +273,61 @@ class App(tk.Tk):
         self.tree.heading("#0", text="问题")
         self.tree.heading("tags", text="标签")
         self.tree.heading("kids", text="子节点")
-        self.tree.column("#0", width=420, stretch=True)
-        self.tree.column("tags", width=140, stretch=False)
-        self.tree.column("kids", width=60, stretch=False, anchor="center")
+        self.tree.column("#0", width=360, minwidth=200, stretch=True)
+        self.tree.column("tags", width=120, minwidth=80, stretch=False)
+        self.tree.column("kids", width=64, minwidth=48, stretch=False, anchor="center")
         ysb = ttk.Scrollbar(tree_wrap, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=ysb.set)
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        ysb.pack(side=tk.RIGHT, fill=tk.Y)
+        xsb = ttk.Scrollbar(tree_wrap, orient=tk.HORIZONTAL, command=self.tree.xview)
+        self.tree.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        ysb.grid(row=0, column=1, sticky="ns")
+        xsb.grid(row=1, column=0, sticky="ew")
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self.on_select())
 
-        # right: editor
-        ttk.Label(right, text="当前节点", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(right, text="问题").pack(anchor="w")
-        self.q_edit = tk.Text(right, height=4, wrap=tk.WORD, font=self.font_body, undo=True)
-        self.q_edit.pack(fill=tk.X, pady=2)
-        ttk.Label(right, text="参考答案").pack(anchor="w")
-        self.a_edit = tk.Text(right, wrap=tk.WORD, font=self.font_body, undo=True)
-        self.a_edit.pack(fill=tk.BOTH, expand=True, pady=2)
-        ttk.Label(right, text="标签（逗号分隔）").pack(anchor="w")
-        self.tags_edit = ttk.Entry(right)
-        self.tags_edit.pack(fill=tk.X, pady=2)
-        ttk.Button(right, text="写回当前节点（本地）", command=self.on_apply).pack(
-            fill=tk.X, pady=4
+        # ---- right: editor ----
+        ttk.Label(right, text="当前节点", style="Title.TLabel").grid(
+            row=0, column=0, sticky="w"
         )
-        ttk.Button(right, text="删除当前节点", command=self.on_delete).pack(fill=tk.X)
+        ttk.Label(right, text="问题").grid(row=1, column=0, sticky="w", pady=(6, 2))
+        self.q_edit = tk.Text(
+            right, height=4, wrap=tk.WORD, font=self.font_body, undo=True, width=40
+        )
+        self.q_edit.grid(row=2, column=0, sticky="ew")
+
+        ttk.Label(right, text="参考答案").grid(row=3, column=0, sticky="w", pady=(6, 2))
+        ans_box = ttk.Frame(right)
+        ans_box.grid(row=4, column=0, sticky="nsew")
+        right.rowconfigure(4, weight=1)
+        ans_box.columnconfigure(0, weight=1)
+        ans_box.rowconfigure(0, weight=1)
+        self.a_edit = tk.Text(
+            ans_box, wrap=tk.WORD, font=self.font_body, undo=True, width=40, height=12
+        )
+        self.a_edit.grid(row=0, column=0, sticky="nsew")
+        ans_scroll = ttk.Scrollbar(ans_box, orient=tk.VERTICAL, command=self.a_edit.yview)
+        ans_scroll.grid(row=0, column=1, sticky="ns")
+        self.a_edit.configure(yscrollcommand=ans_scroll.set)
+
+        ttk.Label(right, text="标签（逗号分隔）").grid(row=5, column=0, sticky="w", pady=(6, 2))
+        self.tags_edit = ttk.Entry(right)
+        self.tags_edit.grid(row=6, column=0, sticky="ew")
+
+        right_btns = ttk.Frame(right)
+        right_btns.grid(row=7, column=0, sticky="ew", pady=(8, 0))
+        right_btns.columnconfigure(0, weight=1)
+        ttk.Button(right_btns, text="写回当前节点（本地）", command=self.on_apply).grid(
+            row=0, column=0, sticky="ew", pady=1
+        )
+        ttk.Button(right_btns, text="删除当前节点", command=self.on_delete).grid(
+            row=1, column=0, sticky="ew", pady=1
+        )
 
         self.status = tk.StringVar(value="ready")
-        ttk.Label(self, textvariable=self.status, anchor="w", font=self.font_status).grid(
-            row=1, column=0, sticky="ew", padx=8, pady=4
+        status_bar = ttk.Label(
+            self, textvariable=self.status, anchor="w", font=self.font_status
         )
+        status_bar.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
+        self.rowconfigure(1, weight=0)
 
     # ----- helpers -----
     def _persist_cfg(self) -> None:
@@ -254,6 +347,7 @@ class App(tk.Tk):
             self.btn_offline,
             self.btn_expand,
             self.btn_sync,
+            self.btn_refresh,
             self.btn_save,
             self.btn_export,
         ):
@@ -431,6 +525,32 @@ class App(tk.Tk):
             self._reload_tree()
             self.status.set(
                 f"已生成 {len(self.tree_data.get('nodes') or [])} 个一级题目并保存"
+            )
+
+        self._run_bg(job, ok)
+
+    def on_refresh(self) -> None:
+        jd = self.jd_edit.get("1.0", "end-1c").strip() or DEFAULT_JD
+        extra = self.extra_edit.get("1.0", "end-1c").strip()
+        outline = tree_outline(self.tree_data)
+        self._persist_cfg()
+        self.status.set("正在刷新题树（追加/补充，不删除原文）…")
+
+        def job() -> dict[str, Any]:
+            content = chat(
+                api_key=self.cfg["api_key"],
+                base_url=self.cfg["base_url"],
+                model=self.cfg["model"],
+                messages=build_refresh_messages(jd, outline, extra),
+            )
+            return parse_refresh_payload(content)
+
+        def ok(payload: dict[str, Any]) -> None:
+            stats = merge_refresh_into_tree(self.tree_data, payload)
+            save_tree(self.tree_data)
+            self._reload_tree()
+            self.status.set(
+                f"刷新完成：新增 {stats['added']} · 补充答案 {stats['supplemented']} · 追加子题 {stats['child_added']}"
             )
 
         self._run_bg(job, ok)
