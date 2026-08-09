@@ -195,10 +195,28 @@ def empty_tree(title: str = "面试题树") -> dict[str, Any]:
     }
 
 
+def coerce_tests(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip())
+        elif isinstance(item, dict):
+            code = item.get("code") or item.get("assert") or item.get("test")
+            if code and str(code).strip():
+                out.append(str(code).strip())
+    return out
+
+
 def normalize_node(raw: dict[str, Any]) -> dict[str, Any]:
     children = [normalize_node(c) for c in coerce_children(raw.get("children"))]
-    return {
+    kind = str(raw.get("kind") or "qa").strip().lower()
+    if kind not in ("qa", "coding"):
+        kind = "coding" if raw.get("starter_code") or raw.get("tests") else "qa"
+    node: dict[str, Any] = {
         "id": str(raw.get("id") or new_id()),
+        "kind": kind,
         "question": str(raw.get("question") or "").strip() or "（未命名问题）",
         "answer": str(raw.get("answer") or "").strip(),
         "tags": coerce_tags(raw.get("tags")),
@@ -206,6 +224,16 @@ def normalize_node(raw: dict[str, Any]) -> dict[str, Any]:
         "updated_at": str(raw.get("updated_at") or utc_now()),
         "source": str(raw.get("source") or "deepseek"),
     }
+    if kind == "coding" or raw.get("starter_code") or raw.get("solution_code") or raw.get(
+        "tests"
+    ):
+        node["kind"] = "coding"
+        node["language"] = str(raw.get("language") or "python").strip() or "python"
+        node["starter_code"] = str(raw.get("starter_code") or "")
+        node["solution_code"] = str(raw.get("solution_code") or "")
+        node["tests"] = coerce_tests(raw.get("tests"))
+        node["hint"] = str(raw.get("hint") or "").strip()
+    return node
 
 
 def normalize_tree(raw: dict[str, Any]) -> dict[str, Any]:
@@ -663,10 +691,100 @@ def seed_offline_tree(jd: str) -> dict[str, Any]:
                 }
             )
         )
+    nodes.extend(offline_coding_nodes())
     title = "FRAME 岗位面试题树（离线种子）"
     if "Vibe" in jd or "Nest" in jd:
         title = "基于当前 JD 的面试题树（离线种子）"
     return normalize_tree({"title": title, "nodes": nodes})
+
+
+def offline_coding_nodes() -> list[dict[str, Any]]:
+    """两道可跑测的离线实操题。"""
+    return [
+        normalize_node(
+            {
+                "kind": "coding",
+                "question": "【实操】实现 RBAC：has_permission(user_roles, required)",
+                "answer": "用户角色集合与所需角色求交；空 required 视为放行；注意大小写与空角色。",
+                "tags": ["RBAC", "实操"],
+                "language": "python",
+                "starter_code": (
+                    "def has_permission(user_roles, required):\n"
+                    '    """user_roles/required: list[str]。required 为空则 True。"""\n'
+                    "    # TODO: 实现\n"
+                    "    pass\n"
+                ),
+                "solution_code": (
+                    "def has_permission(user_roles, required):\n"
+                    "    if not required:\n"
+                    "        return True\n"
+                    "    have = {str(r).strip().lower() for r in (user_roles or []) if r}\n"
+                    "    need = {str(r).strip().lower() for r in (required or []) if r}\n"
+                    "    return bool(have & need)\n"
+                ),
+                "tests": [
+                    'assert has_permission(["admin"], ["admin"]) is True',
+                    'assert has_permission(["editor"], ["admin"]) is False',
+                    'assert has_permission(["editor", "viewer"], ["admin", "editor"]) is True',
+                    "assert has_permission([\"viewer\"], []) is True",
+                ],
+                "hint": "把两边都转成小写 set，再判断交集是否非空。",
+                "source": "offline-seed",
+                "children": [],
+            }
+        ),
+        normalize_node(
+            {
+                "kind": "coding",
+                "question": "【实操】分片上传：merge_chunks(parts) 按 index 拼回 bytes",
+                "answer": "parts 为 {index:int, data:bytes} 列表；按 index 排序后拼接；缺片要抛错。",
+                "tags": ["分片上传", "实操"],
+                "language": "python",
+                "starter_code": (
+                    "def merge_chunks(parts):\n"
+                    '    """parts: list[dict]，每项含 index(int) 与 data(bytes)。"""\n'
+                    "    # TODO: 实现\n"
+                    "    pass\n"
+                ),
+                "solution_code": (
+                    "def merge_chunks(parts):\n"
+                    "    if not parts:\n"
+                    "        return b\"\"\n"
+                    "    ordered = sorted(parts, key=lambda p: int(p[\"index\"]))\n"
+                    "    indexes = [int(p[\"index\"]) for p in ordered]\n"
+                    "    if indexes != list(range(len(indexes))):\n"
+                    "        raise ValueError(\"missing or duplicate chunk\")\n"
+                    "    return b\"\".join(p[\"data\"] for p in ordered)\n"
+                ),
+                "tests": [
+                    'assert merge_chunks([{"index":0,"data":b"a"},{"index":1,"data":b"b"}]) == b"ab"',
+                    'assert merge_chunks([]) == b""',
+                    (
+                        "try:\n"
+                        "    merge_chunks([{\"index\":0,\"data\":b\"a\"},{\"index\":2,\"data\":b\"c\"}])\n"
+                        "    raise AssertionError('should fail')\n"
+                        "except ValueError:\n"
+                        "    pass"
+                    ),
+                ],
+                "hint": "先按 index 排序，再检查是否为 0..n-1 连续。",
+                "source": "offline-seed",
+                "children": [],
+            }
+        ),
+    ]
+
+
+def ensure_coding_nodes(tree: dict[str, Any]) -> int:
+    """若题树还没有实操题，追加离线两道；返回追加数量。"""
+    existing = list(walk(tree.get("nodes") or []))
+    if any(n.get("kind") == "coding" for n in existing):
+        return 0
+    nodes = tree.setdefault("nodes", [])
+    extra = offline_coding_nodes()
+    nodes.extend(extra)
+    tree["updated_at"] = utc_now()
+    return len(extra)
 
 
 def deep_copy_tree(tree: dict[str, Any]) -> dict[str, Any]:

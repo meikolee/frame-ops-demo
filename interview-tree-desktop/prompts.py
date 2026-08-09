@@ -248,3 +248,67 @@ def parse_sync_payload(text: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("同步结果不是对象")
     return data
+
+
+def build_coding_messages(jd: str, extra: str = "", count: int = 3) -> list[dict[str, str]]:
+    jd_short = (jd or "").strip()
+    if len(jd_short) > 1600:
+        jd_short = jd_short[:1600] + "\n…(JD 已截断)"
+    user = f"""请根据职位描述生成 {count} 道「可本地手写」的面试实操编程题（Python）。
+
+硬性要求：
+1. 每题必须能在单文件 Python 里完成，15~30 分钟难度
+2. 紧扣 JD（Nest/Next/SQL/RBAC/上传/流媒体/Linux 运维相关算法或小函数均可）
+3. starter_code 给出函数签名与 TODO；solution_code 给出完整可运行参考实现
+4. tests 为 3~5 条可直接 exec 的断言或短代码（字符串），不要依赖第三方库
+5. 只输出 JSON 对象
+
+输出：
+{{
+  "nodes": [
+    {{
+      "kind": "coding",
+      "question": "【实操】题目标题",
+      "answer": "考点说明与口述提示（中文）",
+      "tags": ["实操", "..."],
+      "language": "python",
+      "starter_code": "def foo(...):\\n    pass\\n",
+      "solution_code": "def foo(...):\\n    ...\\n",
+      "tests": ["assert foo(...) == ...", "..."],
+      "hint": "一句提示",
+      "children": []
+    }}
+  ]
+}}
+
+职位描述：
+{jd_short}
+
+补充要求：
+{extra or "覆盖鉴权、数据结构、字符串/数组、并发安全中的至少一类"}
+"""
+    return [
+        {"role": "system", "content": SYSTEM_JSON},
+        {"role": "user", "content": user},
+    ]
+
+
+def parse_coding_payload(text: str) -> list[dict[str, Any]]:
+    data = _extract_json(text)
+    if isinstance(data, list):
+        nodes = data
+    elif isinstance(data, dict):
+        nodes = data.get("nodes") or data.get("exercises") or data.get("children") or []
+    else:
+        raise ValueError("实操题结果不是 JSON")
+    if not isinstance(nodes, list) or not nodes:
+        raise ValueError("缺少实操题 nodes")
+    out: list[dict[str, Any]] = []
+    for n in nodes:
+        if not isinstance(n, dict):
+            continue
+        n = {**n, "kind": "coding"}
+        out.append(n)
+    if not out:
+        raise ValueError("没有有效的实操题")
+    return out

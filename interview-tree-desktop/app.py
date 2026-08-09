@@ -17,11 +17,22 @@ from typing import Any, Callable
 
 from defaults import DEFAULT_BASE_URL, DEFAULT_JD, DEFAULT_MODEL
 from deepseek_client import chat, test_connection
+from coding_lab import (
+    LANG_LABELS,
+    LANG_OPTIONS,
+    STARTERS,
+    normalize_lang,
+    runtime_status,
+    run_snippet,
+    run_with_tests,
+)
 from prompts import (
+    build_coding_messages,
     build_expand_messages,
     build_generate_messages,
     build_refresh_messages,
     build_sync_messages,
+    parse_coding_payload,
     parse_expand_payload,
     parse_generate_payload,
     parse_refresh_payload,
@@ -32,6 +43,7 @@ from tree_store import (
     create_tree,
     current_tree_id,
     delete_tree,
+    ensure_coding_nodes,
     export_html,
     export_markdown,
     export_pdf,
@@ -41,6 +53,7 @@ from tree_store import (
     load_config,
     load_tree,
     merge_refresh_into_tree,
+    normalize_node,
     normalize_tree,
     path_to_node,
     rename_tree,
@@ -588,6 +601,240 @@ class QuizWindow(tk.Toplevel):
         self._show()
 
 
+class CodingLabWindow(tk.Toplevel):
+    """实操实验室：多语言编辑、运行、自测、看参考实现。"""
+
+    def __init__(
+        self,
+        master: App,
+        node: dict[str, Any],
+        font_ui: tkfont.Font,
+        font_code: tkfont.Font,
+    ) -> None:
+        super().__init__(master)
+        self.master_app = master
+        self.node = node
+        self._font_ui = font_ui
+        self.title(f"实操实验室 · {node.get('question') or '编程题'}")
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = int(sw * 0.85), int(sh * 0.85)
+        self.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+        self.minsize(960, 640)
+
+        self.columnconfigure(0, weight=1)
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        head = ttk.Frame(self)
+        head.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(10, 4))
+        head.columnconfigure(0, weight=1)
+        ttk.Label(
+            head,
+            text=node.get("question") or "实操题",
+            style="Title.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+
+        lang_row = ttk.Frame(head)
+        lang_row.grid(row=0, column=1, sticky="e", padx=(8, 8))
+        ttk.Label(lang_row, text="语言").pack(side=tk.LEFT)
+        self._lang_ids = [lid for _, lid in LANG_OPTIONS]
+        self._lang_labels = [label for label, _ in LANG_OPTIONS]
+        initial = normalize_lang(node.get("language") or "python")
+        self.lang_var = tk.StringVar(
+            value=LANG_LABELS.get(initial, "Python")
+        )
+        self.lang_combo = ttk.Combobox(
+            lang_row,
+            textvariable=self.lang_var,
+            values=self._lang_labels,
+            state="readonly",
+            width=18,
+            font=font_ui,
+        )
+        self.lang_combo.pack(side=tk.LEFT, padx=6)
+        self.lang_combo.bind("<<ComboboxSelected>>", self.on_lang_change)
+        self.runtime_var = tk.StringVar(value="")
+        ttk.Label(lang_row, textvariable=self.runtime_var).pack(side=tk.LEFT, padx=4)
+        ttk.Button(head, text="关闭", command=self.destroy).grid(row=0, column=2, sticky="e")
+
+        left = ttk.Frame(self, padding=8)
+        left.grid(row=1, column=0, sticky="nsew")
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(1, weight=1)
+        ttk.Label(left, text="题目说明 / 考点", font=font_ui).grid(row=0, column=0, sticky="w")
+        desc = tk.Text(left, height=10, wrap=tk.WORD, font=font_ui)
+        desc.grid(row=1, column=0, sticky="nsew", pady=4)
+        desc.insert(
+            "1.0",
+            (node.get("answer") or "")
+            + (("\n\n提示：" + node["hint"]) if node.get("hint") else ""),
+        )
+        desc.configure(state=tk.DISABLED)
+
+        ttk.Label(left, text="自测用例（需与当前语言匹配）", font=font_ui).grid(
+            row=2, column=0, sticky="w", pady=(8, 2)
+        )
+        tests_box = tk.Text(left, height=8, wrap=tk.WORD, font=font_code)
+        tests_box.grid(row=3, column=0, sticky="nsew")
+        tests_box.insert("1.0", "\n".join(node.get("tests") or []) or "（无用例）")
+        tests_box.configure(state=tk.DISABLED)
+        left.rowconfigure(3, weight=1)
+
+        right = ttk.Frame(self, padding=8)
+        right.grid(row=1, column=1, sticky="nsew")
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(1, weight=3)
+        right.rowconfigure(3, weight=2)
+        self.code_label = ttk.Label(right, text="你的代码", font=font_ui)
+        self.code_label.grid(row=0, column=0, sticky="w")
+        self.code = tk.Text(right, wrap=tk.NONE, font=font_code, undo=True)
+        self.code.grid(row=1, column=0, sticky="nsew", pady=4)
+        starter = node.get("starter_code") or STARTERS.get(initial, "")
+        self.code.insert("1.0", starter)
+        code_scroll = ttk.Scrollbar(right, orient=tk.VERTICAL, command=self.code.yview)
+        code_scroll.grid(row=1, column=1, sticky="ns")
+        self.code.configure(yscrollcommand=code_scroll.set)
+
+        btns = ttk.Frame(right)
+        btns.grid(row=2, column=0, columnspan=2, sticky="ew", pady=6)
+        for i in range(4):
+            btns.columnconfigure(i, weight=1)
+        ttk.Button(btns, text="运行代码", command=self.on_run).grid(
+            row=0, column=0, sticky="ew", padx=2
+        )
+        ttk.Button(btns, text="跑自测", command=self.on_test).grid(
+            row=0, column=1, sticky="ew", padx=2
+        )
+        ttk.Button(btns, text="重置模板", command=self.on_reset).grid(
+            row=0, column=2, sticky="ew", padx=2
+        )
+        ttk.Button(btns, text="查看参考实现", command=self.on_solution).grid(
+            row=0, column=3, sticky="ew", padx=2
+        )
+
+        ttk.Label(right, text="输出", font=font_ui).grid(row=3, column=0, sticky="w")
+        self.out = tk.Text(right, wrap=tk.WORD, font=font_code, height=10)
+        self.out.grid(row=4, column=0, columnspan=2, sticky="nsew")
+
+        self._original_lang = initial
+        self._refresh_lang_ui()
+
+    def _current_lang(self) -> str:
+        label = self.lang_var.get()
+        for lab, lid in LANG_OPTIONS:
+            if lab == label:
+                return lid
+        return "python"
+
+    def _refresh_lang_ui(self) -> None:
+        lang = self._current_lang()
+        self.code_label.configure(text=f"你的代码（{LANG_LABELS.get(lang, lang)}）")
+        ok, info = runtime_status(lang)
+        self.runtime_var.set(("✓ " if ok else "✗ ") + str(info))
+
+    def on_lang_change(self, _event: object | None = None) -> None:
+        lang = self._current_lang()
+        self._refresh_lang_ui()
+        cur = self.code.get("1.0", "end-1c").strip()
+        old_starters = {s.strip() for s in STARTERS.values() if s}
+        node_starter = (self.node.get("starter_code") or "").strip()
+        if (not cur) or cur in old_starters or cur == node_starter:
+            self.code.delete("1.0", tk.END)
+            if lang == self._original_lang and node_starter:
+                self.code.insert("1.0", node_starter)
+            else:
+                self.code.insert("1.0", STARTERS.get(lang, ""))
+        self.status_note(f"已切换语言：{LANG_LABELS.get(lang, lang)}")
+
+    def status_note(self, text: str) -> None:
+        try:
+            self.master_app.status.set(text)
+        except Exception:
+            pass
+
+    def _set_out(self, text: str) -> None:
+        self.out.delete("1.0", tk.END)
+        self.out.insert("1.0", text)
+
+    def on_run(self) -> None:
+        lang = self._current_lang()
+        ok, info = runtime_status(lang)
+        if not ok:
+            self._set_out(str(info))
+            messagebox.showwarning("运行环境不可用", str(info), parent=self)
+            return
+        r = run_snippet(lang, self.code.get("1.0", "end-1c"))
+        parts = [
+            f"language={lang}",
+            f"exit={r['returncode']}",
+            "--- stdout ---",
+            r.get("stdout") or "(空)",
+            "--- stderr ---",
+            r.get("stderr") or "(空)",
+        ]
+        self._set_out("\n".join(parts))
+
+    def on_test(self) -> None:
+        lang = self._current_lang()
+        node_lang = self._original_lang
+        tests = self.node.get("tests") or []
+        if not tests:
+            messagebox.showinfo("跑自测", "本题没有自测用例，可直接「运行代码」。", parent=self)
+            return
+        if lang != node_lang:
+            if not messagebox.askyesno(
+                "语言不一致",
+                f"本题自测用例按「{LANG_LABELS.get(node_lang, node_lang)}」编写，"
+                f"当前选择是「{LANG_LABELS.get(lang, lang)}」。\n仍要尝试跑自测吗？",
+                parent=self,
+            ):
+                return
+        ok, info = runtime_status(lang)
+        if not ok:
+            self._set_out(str(info))
+            messagebox.showwarning("运行环境不可用", str(info), parent=self)
+            return
+        r = run_with_tests(self.code.get("1.0", "end-1c"), tests, lang=lang)
+        lines = [f"语言：{lang}", f"结果：{r['passed']}/{r['total']} 通过"]
+        for d in r.get("details") or []:
+            mark = "✓" if d["ok"] else "✗"
+            lines.append(f"{mark} #{d['index']} {d['test'][:80]}")
+            if not d["ok"]:
+                lines.append(f"    → {d['message']}")
+        self._set_out("\n".join(lines))
+        if r.get("ok"):
+            messagebox.showinfo("自测通过", f"全部 {r['total']} 条用例通过！", parent=self)
+
+    def on_reset(self) -> None:
+        lang = self._current_lang()
+        self.code.delete("1.0", tk.END)
+        if lang == self._original_lang and self.node.get("starter_code"):
+            self.code.insert("1.0", self.node.get("starter_code") or "")
+        else:
+            self.code.insert("1.0", STARTERS.get(lang, ""))
+
+    def on_solution(self) -> None:
+        lang = self._current_lang()
+        if lang != self._original_lang:
+            messagebox.showinfo(
+                "参考实现",
+                f"参考实现属于「{LANG_LABELS.get(self._original_lang, self._original_lang)}」，"
+                "请先把语言切回该语言再查看。",
+                parent=self,
+            )
+            return
+        sol = (self.node.get("solution_code") or "").strip()
+        if not sol:
+            messagebox.showinfo("参考实现", "本题暂无参考实现", parent=self)
+            return
+        if not messagebox.askyesno(
+            "查看参考实现", "将把参考实现填入编辑器（可先另存你的代码）。继续？", parent=self
+        ):
+            return
+        self.code.delete("1.0", tk.END)
+        self.code.insert("1.0", sol)
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -613,9 +860,15 @@ class App(tk.Tk):
         self._setup_fonts()
         self._build_ui()
         self._load_jd_from_tree()
+        added_coding = ensure_coding_nodes(self.tree_data)
+        if added_coding:
+            self._save_current_tree()
         self._reload_tree()
         self._reload_tree_switcher()
-        self.status.set(f"本地文件：{tree_path()}")
+        if added_coding:
+            self.status.set(f"已自动追加 {added_coding} 道离线实操题（可开「实操实验室」）")
+        else:
+            self.status.set(f"本地文件：{tree_path()}")
 
         if not (self.tree_data.get("nodes") or []):
             self.on_offline_seed()
@@ -867,17 +1120,24 @@ class App(tk.Tk):
             "对照整棵现有题树做增量刷新：只追加新题、补充答案与子题，绝不删除已有内容。",
         )
         self.btn_refresh.grid(row=4, column=0, sticky="ew", pady=1)
+        self.btn_coding = self._button(
+            actions,
+            "⑤ 生成实操编程题（追加）",
+            self.on_generate_coding,
+            "按 JD 生成可手写的 Python 实操题并追加到题树（不删除原有口述题）。",
+        )
+        self.btn_coding.grid(row=5, column=0, sticky="ew", pady=1)
         self.btn_undo = self._button(
             actions,
             "↩ 撤销上次刷新",
             self.on_undo_refresh,
             "把整棵题树回滚到上一次刷新之前的状态（仅记录最近一次）。",
         )
-        self.btn_undo.grid(row=5, column=0, sticky="ew", pady=1)
+        self.btn_undo.grid(row=6, column=0, sticky="ew", pady=1)
         self.btn_undo.configure(state=tk.DISABLED)
 
         save_row = ttk.Frame(actions)
-        save_row.grid(row=6, column=0, sticky="ew", pady=(4, 0))
+        save_row.grid(row=7, column=0, sticky="ew", pady=(4, 0))
         save_row.columnconfigure(0, weight=1)
         save_row.columnconfigure(1, weight=1)
         self.btn_save = self._button(
@@ -896,7 +1156,7 @@ class App(tk.Tk):
         self.btn_export.grid(row=0, column=1, sticky="ew", padx=(3, 0))
 
         export_row = ttk.Frame(actions)
-        export_row.grid(row=7, column=0, sticky="ew", pady=(4, 0))
+        export_row.grid(row=8, column=0, sticky="ew", pady=(4, 0))
         export_row.columnconfigure(0, weight=1)
         export_row.columnconfigure(1, weight=1)
         self.btn_export_html = self._button(
@@ -929,10 +1189,16 @@ class App(tk.Tk):
         ).grid(row=0, column=1, sticky="e", padx=4)
         self._button(
             mid_head,
+            "实操实验室",
+            self.on_open_coding_lab,
+            "打开当前选中的【实操】编程题，在内置编辑器写代码并跑自测。",
+        ).grid(row=0, column=2, sticky="e", padx=4)
+        self._button(
+            mid_head,
             "刷新（追加补充）",
             self.on_refresh,
             "与左侧「④ 刷新题树」相同：增量追加/补充，不删除原有题目。",
-        ).grid(row=0, column=2, sticky="e")
+        ).grid(row=0, column=3, sticky="e")
 
         # 题库切换 + 搜索
         tree_bar = ttk.Frame(mid)
@@ -1795,6 +2061,7 @@ class App(tk.Tk):
             self.btn_expand,
             self.btn_sync,
             self.btn_refresh,
+            self.btn_coding,
             self.btn_undo,
             self.btn_save,
             self.btn_export,
@@ -1857,7 +2124,10 @@ class App(tk.Tk):
                 iid = self.tree.insert(
                     parent_iid,
                     "end",
-                    text=n.get("question") or "",
+                    text=(
+                        ("[实操] " if n.get("kind") == "coding" else "")
+                        + (n.get("question") or "")
+                    ),
                     values=(", ".join(n.get("tags") or []), len(n.get("children") or [])),
                     open=parent_iid == "",
                 )
@@ -1887,6 +2157,8 @@ class App(tk.Tk):
         self.tags_edit.delete(0, tk.END)
         self.tags_edit.insert(0, ", ".join(node.get("tags") or []))
         self._reapply_term_highlights()
+        if node.get("kind") == "coding":
+            self.status.set("实操题：点中间栏「实操实验室」写代码并跑自测")
 
     def on_apply(self) -> None:
         node_id = self._selected_node_id()
@@ -1991,6 +2263,58 @@ class App(tk.Tk):
             )
 
         self._run_bg(job, ok)
+
+    def on_generate_coding(self) -> None:
+        jd = self.jd_edit.get("1.0", "end-1c").strip() or DEFAULT_JD
+        extra = self.extra_edit.get("1.0", "end-1c").strip()
+        self._persist_cfg()
+        self.status.set("正在生成实操编程题…")
+
+        def job() -> list[dict[str, Any]]:
+            content = chat(
+                api_key=self.cfg["api_key"],
+                base_url=self.cfg["base_url"],
+                model=self.cfg["model"],
+                messages=build_coding_messages(jd, extra, count=3),
+                timeout=180,
+                max_tokens=4096,
+            )
+            return parse_coding_payload(content)
+
+        def ok(raw_nodes: list[dict[str, Any]]) -> None:
+            nodes = self.tree_data.setdefault("nodes", [])
+            added = 0
+            first_id = None
+            for raw in raw_nodes:
+                node = normalize_node({**raw, "kind": "coding", "source": "deepseek-coding"})
+                nodes.append(node)
+                added += 1
+                if first_id is None:
+                    first_id = node["id"]
+            self._save_current_tree()
+            self._reload_tree(select_id=first_id)
+            self.status.set(f"已追加 {added} 道实操编程题（可点「实操实验室」开写）")
+
+        self._run_bg(job, ok)
+
+    def on_open_coding_lab(self) -> None:
+        node = self._selected_node()
+        if node is None or node.get("kind") != "coding":
+            # 若未选中实操题，尝试打开第一道实操题
+            coding_nodes = [n for n in walk(self.tree_data.get("nodes") or []) if n.get("kind") == "coding"]
+            if not coding_nodes:
+                messagebox.showinfo(
+                    "实操实验室",
+                    "题树里还没有实操题。可先点「离线种子树」或「⑤ 生成实操编程题」。",
+                )
+                return
+            if node is None or node.get("kind") != "coding":
+                node = coding_nodes[0]
+                messagebox.showinfo(
+                    "实操实验室",
+                    f"未选中实操题，已打开：\n{node.get('question')}",
+                )
+        CodingLabWindow(self, node, self.font_ui, self.font_input)
 
     def on_refresh(self) -> None:
         jd = self.jd_edit.get("1.0", "end-1c").strip() or DEFAULT_JD
